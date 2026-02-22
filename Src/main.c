@@ -21,6 +21,10 @@
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
+#include <stdio.h>
+#include <string.h>
+#include <math.h>
+#include <stdlib.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -62,7 +66,11 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+volatile float desiredAngle = 60.0f;   // default setpoint
 
+static uint8_t rxByte;
+static char rxLine[32];
+static uint8_t rxIdx = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -121,12 +129,22 @@ int main(void)
   uint8_t prev_state = 0;
   uint8_t curr_state = 0;
 
+  char msg[128];
+
+  // PID
+  float u = 0;
+  float duty = 0;
+
+
+  // Encoder
   int counterValue = 0;
   int pastCounterValue = 0;
   float angleValue = 0;
   char printMessage[200] = {'\0'};
 
   HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
+  HAL_UART_Receive_IT(&huart2, &rxByte, 1);	// UART Receive
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
 
   /* USER CODE END 2 */
 
@@ -136,18 +154,36 @@ int main(void)
   {
     /* USER CODE END WHILE */
     /* USER CODE BEGIN 3 */
+
+	  // Actual Angle (Encoder to Angle)
 	  counterValue = TIM2->CNT;
-
-	  if (counterValue != pastCounterValue)
-	  {
-	      angleValue = (360.0 / 444.0) * ((float)counterValue);
-
-	      sprintf(printMessage, "Current angle is: %f\r\n", angleValue);
-
-	      HAL_UART_Transmit(&huart2, (uint8_t*)printMessage, sizeof(printMessage), 300);
-	  }
+	  angleValue = (360.0 / 444.0) * ((float)counterValue);
 
 	  pastCounterValue = counterValue;
+
+	  // PID Control
+	  u = PIDController_Update(&pid, desiredAngle, angleValue);
+		//if (u >= 0.0f)
+			//HAL_GPIO_WritePin(DIR_GPIO_Port, DIR_Pin, GPIO_PIN_SET);
+		//else
+			//HAL_GPIO_WritePin(DIR_GPIO_Port, DIR_Pin, GPIO_PIN_RESET);
+
+		duty = fabsf(u) / pid.limMax;
+		    if (duty > 1.0f) duty = 1.0f;
+
+		// PWM Set
+		uint32_t arr = __HAL_TIM_GET_AUTORELOAD(&htim1);
+		uint32_t ccr = (uint32_t)(duty * (float)arr);
+		__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, ccr);
+
+		// 5) UART print: desired + current
+		sprintf(printMessage, "Desired, Actual, Duty: %f, %f, %f\r\n", desiredAngle, angleValue, duty);
+		HAL_UART_Transmit(&huart2, (uint8_t*)printMessage, sizeof(printMessage), 300);
+
+	    // 6) fixed sample time
+	    HAL_Delay(10);
+
+
   }
   /* USER CODE END 3 */
 }
@@ -189,7 +225,49 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART2)
+    {
+        char c = (char)rxByte;
 
+        // End of line -> parse
+        if (c == '\n' || c == '\r')
+        {
+            if (rxIdx > 0)
+            {
+                rxLine[rxIdx] = '\0';
+
+                // Convert string to float
+                float val = strtof(rxLine, NULL);
+
+                // Optional: clamp to a sane range (0..360)
+                //if (val < 0.0f) val = 0.0f;
+                //if (val > 360.0f) val = 360.0f;
+
+                desiredAngle = val;
+
+                rxIdx = 0;
+            }
+        }
+        else
+        {
+            // Store chars until buffer full
+            if (rxIdx < (sizeof(rxLine) - 1))
+            {
+                rxLine[rxIdx++] = c;
+            }
+            else
+            {
+                // Overflow: reset line
+                rxIdx = 0;
+            }
+        }
+
+        // Re-arm RX interrupt for next byte
+        HAL_UART_Receive_IT(&huart2, &rxByte, 1);
+    }
+}
 /* USER CODE END 4 */
 
 /**
