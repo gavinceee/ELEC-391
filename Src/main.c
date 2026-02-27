@@ -186,6 +186,7 @@ int main(void)
     duty_cmd = fabsf(u) / pid.limMax;
 
     if (duty_cmd > DUTY_MAX) duty_cmd = DUTY_MAX;
+    //duty_cmd = 1.0f;
 
     // --- 5) Direction hysteresis state machine (prevents chatter) ---
     if (dir_state == 0) {
@@ -198,7 +199,10 @@ int main(void)
         if (u > -U_OFF) dir_state = 0;
         else if (u >  U_ON) dir_state = +1;
     }
+
     dir = dir_state;
+
+    // dir = 1;
 
     // If stopped, force duty to 0
     if (dir == 0) duty_cmd = 0.0f;
@@ -227,10 +231,10 @@ int main(void)
         PWM_SetDuty(&PWM_REV_TIM, PWM_REV_CH, 0.0f);
     }
 
-    // --- 8) Throttled UART print (every 100 ms) ---
+    // --- 8) Throttled UART print (every 10 ms) ---
     if (now >= nextPrintTick)
     {
-        nextPrintTick = now + 100;
+        nextPrintTick = now + 10;
 
         int n = snprintf(printMessage, sizeof(printMessage),
                          "Desired, Actual, Duty, u, P, I, D, tau, dir: %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %d\r\n",
