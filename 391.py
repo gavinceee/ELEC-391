@@ -37,39 +37,80 @@ VOFA_RX_PORT = 1346
 tx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 # ----------------------------
-# Parsing
+# Physical key → motor degree mapping
+# Measured: E3 = -1457 deg, E5 = -208 deg  (24 semitone steps, linear)
 # ----------------------------
-LINE_RE = re.compile(
-    r"Desired,\s*Actual,\s*Duty,\s*u,\s*P,\s*I,\s*D,\s*tau,\s*dir:\s*"
-    r"([-\d.]+),\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+),\s*([-\d]+)"
-)
+_KEY_DEGREES = {
+    "E3":  -1457.00,
+    "F3":  -1404.96,
+    "F#3": -1352.92,
+    "G3":  -1300.88,
+    "G#3": -1248.83,
+    "A3":  -1196.79,
+    "A#3": -1144.75,
+    "B3":  -1092.71,
+    "C4":  -1040.67,
+    "C#4":  -988.62,
+    "D4":   -936.58,
+    "D#4":  -884.54,
+    "E4":   -832.50,
+    "F4":   -780.46,
+    "F#4":  -728.42,
+    "G4":   -676.38,
+    "G#4":  -624.33,
+    "A4":   -572.29,
+    "A#4":  -520.25,
+    "B4":   -468.21,
+    "C5":   -416.17,
+    "C#5":  -364.12,
+    "D5":   -312.08,
+    "D#5":  -260.04,
+    "E5":   -208.00,
+}
 
-# ----------------------------
-# Note mapping  (one note per 20 degrees)
-# ----------------------------
-_CHROMATIC = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+# Ordered list of valid note names (E3 → E5)
+_KEY_ORDER = list(_KEY_DEGREES.keys())
 
-def angle_to_note(degrees: float) -> str:
-    semitone = int(degrees / 20.0)
-    midi = 60 + semitone
-    octave = midi // 12 - 1
-    name   = _CHROMATIC[midi % 12]
-    return f"{name}{octave}"
+# Flat → sharp normalisation
+_FLAT_MAP = {
+    "DB": "C#", "EB": "D#", "GB": "F#", "AB": "G#", "BB": "A#",
+    "DB3": "C#3", "EB3": "D#3", "GB3": "F#3", "AB3": "G#3", "BB3": "A#3",
+    "DB4": "C#4", "EB4": "D#4", "GB4": "F#4", "AB4": "G#4", "BB4": "A#4",
+    "DB5": "C#5", "EB5": "D#5", "GB5": "F#5", "AB5": "G#5", "BB5": "A#5",
+}
+
+
+def _normalise_note(note_name: str) -> str:
+    """Upper-case and convert flats to sharps."""
+    n = note_name.strip().upper()
+    return _FLAT_MAP.get(n, n)
+
 
 def note_to_angle(note_name: str) -> float:
-    """Convert a note name like 'C4', 'D#4', 'G3' back to angle in degrees."""
-    m = re.match(r"([A-Ga-g][#b]?)(\d)", note_name.strip())
-    if not m:
-        raise ValueError(f"Cannot parse note: {note_name!r}")
-    pitch, octave_str = m.group(1).upper(), int(m.group(2))
-    # normalise flats → sharps
-    flat_map = {"DB": "C#", "EB": "D#", "GB": "F#", "AB": "G#", "BB": "A#"}
-    pitch = flat_map.get(pitch, pitch)
-    if pitch not in _CHROMATIC:
-        raise ValueError(f"Unknown pitch: {pitch}")
-    midi = _CHROMATIC.index(pitch) + (octave_str + 1) * 12
-    semitone = midi - 60          # offset from C4
-    return float(semitone * 20)
+    """Return motor degrees for a note in E3–E5.  Raises ValueError if out of range."""
+    n = _normalise_note(note_name)
+    if n not in _KEY_DEGREES:
+        raise ValueError(f"Note {note_name!r} is outside the E3–E5 range. "
+                         f"Valid keys: {', '.join(_KEY_ORDER)}")
+    return _KEY_DEGREES[n]
+
+
+def angle_to_note(degrees: float) -> str:
+    """Return the closest note name for a given motor position."""
+    closest = min(_KEY_DEGREES.items(), key=lambda kv: abs(kv[1] - degrees))
+    return closest[0]
+
+
+# ----------------------------
+# Parsing  (updated format includes 'sw' field at the end)
+# ----------------------------
+LINE_RE = re.compile(
+    r"Desired,\s*Actual,\s*Duty,\s*u,\s*P,\s*I,\s*D,\s*tau,\s*dir"
+    r"(?:,\s*sw)?\s*:\s*"
+    r"([-\d.]+),\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+),\s*"
+    r"([-\d.]+),\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+),\s*([-\d]+)"
+    r"(?:,\s*([-\d]+))?"
+)
 
 
 def list_serial_ports():
@@ -77,24 +118,11 @@ def list_serial_ports():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Built-in songs
-# Each note is (note_name, duration_seconds)
-# REST = None note_name  →  hold current position / send last angle (motor stops naturally)
+# Built-in songs  (all notes must be within E3–E5)
 # ─────────────────────────────────────────────────────────────────────────────
 SONGS = {
-    "1": [
-        ("C4", 1), ("E4", 1), ("A4", 1), 
-        ("E4", 1), ("C4", 1),
-        ("E4", 0.5), ("A4", 0.5), 
-        ("E4", 0.5), ("C4", 0.5),
-        ("E4", 0.25), ("A4", 0.25), 
-        ("E4", 0.25), ("C4", 0.25),        
-    ],
-    "2": [
-    ],
-    "3": [
-    ],
-    "4": [
+    "scale_up": [
+        ("E3", 2), ("E4", 2),("E3", 2), ("E4", 2),("E3", 2), ("E4", 2),("E3", 2), ("E4", 2),("E3", 2), ("E4", 2),("E3", 2), ("E4", 2),
     ],
 }
 
@@ -103,23 +131,12 @@ SONGS = {
 # Sequencer thread
 # ─────────────────────────────────────────────────────────────────────────────
 class Sequencer(threading.Thread):
-    """
-    Walks through a list of (note, duration_s) tuples, sends SP=angle!
-    commands to the MCU via the shared serial reader, and publishes progress
-    events back to the UI queue.
-
-    Events pushed to out_q:
-        ("seq_note",  (index, note_name, angle, total_notes))
-        ("seq_done",  None)
-        ("seq_stop",  None)
-        ("error",     str)
-    """
-    def __init__(self, song: list, reader, out_q: queue.Queue, stop_evt: threading.Event):
+    def __init__(self, song, reader, out_q, stop_evt):
         super().__init__(daemon=True)
-        self.song     = song       # list of (note_name, duration_s)
+        self.song     = song
         self.reader   = reader
         self.out_q    = out_q
-        self.stop_evt = stop_evt   # shared stop flag (caller sets to abort)
+        self.stop_evt = stop_evt
 
     def run(self):
         total = len(self.song)
@@ -134,7 +151,7 @@ class Sequencer(threading.Thread):
                 self.out_q.put(("error", f"[Sequencer] {e}"))
                 continue
 
-            cmd = f"SP={angle:.3f}!"
+            cmd = f"SP={angle:.2f}!"
             try:
                 self.reader.write(cmd)
             except Exception as e:
@@ -144,19 +161,18 @@ class Sequencer(threading.Thread):
 
             self.out_q.put(("seq_note", (idx, note, angle, total)))
 
-            # Precision sleep: use busy-wait for last 5 ms to reduce OS jitter
             t_end = time.perf_counter() + duration
             sleep_bulk = duration - 0.005
             if sleep_bulk > 0:
                 time.sleep(sleep_bulk)
             while time.perf_counter() < t_end:
-                pass  # busy-wait for remaining ~5 ms
+                pass
 
         self.out_q.put(("seq_done", None))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Serial reader thread (unchanged from original)
+# Serial reader thread
 # ─────────────────────────────────────────────────────────────────────────────
 class SerialReader(threading.Thread):
     def __init__(self, port, baud, out_q, stop_evt):
@@ -212,7 +228,7 @@ class SerialReader(threading.Thread):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# VOFA listener thread (unchanged from original)
+# VOFA listener thread
 # ─────────────────────────────────────────────────────────────────────────────
 class VOFAListener(threading.Thread):
     def __init__(self, out_q, stop_evt):
@@ -282,11 +298,9 @@ class App(tk.Tk):
         self.stop_evt = threading.Event()
         self.reader   = None
 
-        # Sequencer state
         self._seq_thread   = None
         self._seq_stop_evt = threading.Event()
 
-        # Data history for plots
         self.t    = deque(maxlen=HIST_N)
         self.des  = deque(maxlen=HIST_N)
         self.act  = deque(maxlen=HIST_N)
@@ -303,7 +317,6 @@ class App(tk.Tk):
 
     # ── UI construction ───────────────────────────────────────────────────────
     def _build_ui(self):
-        # Top controls bar
         top = ttk.Frame(self)
         top.pack(side=tk.TOP, fill=tk.X, padx=8, pady=6)
 
@@ -334,18 +347,16 @@ class App(tk.Tk):
         self.auto_newline = tk.BooleanVar(value=False)
         ttk.Checkbutton(top, text="Append newline", variable=self.auto_newline).pack(side=tk.LEFT, padx=(10, 0))
 
-        # Status bar
         self.status_var = tk.StringVar(value="Idle.")
         ttk.Label(self, textvariable=self.status_var, anchor="w").pack(
             side=tk.BOTTOM, fill=tk.X, padx=8, pady=4)
 
-        # Notebook with two tabs
         nb = ttk.Notebook(self)
         nb.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=4)
 
-        monitor_tab = ttk.Frame(nb)
+        monitor_tab   = ttk.Frame(nb)
         sequencer_tab = ttk.Frame(nb)
-        nb.add(monitor_tab, text="  Monitor  ")
+        nb.add(monitor_tab,   text="  Monitor  ")
         nb.add(sequencer_tab, text="  Sequencer  ")
 
         self._build_monitor_tab(monitor_tab)
@@ -358,7 +369,6 @@ class App(tk.Tk):
         left = ttk.Frame(main)
         main.add(left, weight=1)
 
-        # Note display
         note_frame = ttk.Labelframe(left, text="Current Note")
         note_frame.pack(side=tk.TOP, fill=tk.X, padx=2, pady=(0, 4))
 
@@ -372,11 +382,10 @@ class App(tk.Tk):
                  font=("Helvetica", 11), fg="#555555", bg="#e8f4f8",
                  anchor="center").pack(fill=tk.X, padx=6, pady=(0, 8))
 
-        # Live values table
         table_frame = ttk.Labelframe(left, text="Live Values")
         table_frame.pack(side=tk.TOP, fill=tk.X, padx=2, pady=(0, 4))
 
-        _FIELDS = ["Desired", "Actual", "Duty", "u", "P", "I", "D", "tau", "dir"]
+        _FIELDS = ["Desired", "Actual", "Duty", "u", "P", "I", "D", "tau", "dir", "sw"]
         self._table_vars = {}
         for i, field in enumerate(_FIELDS):
             ttk.Label(table_frame, text=field, width=8, anchor="e",
@@ -386,7 +395,6 @@ class App(tk.Tk):
             ttk.Label(table_frame, textvariable=var, width=12, anchor="w",
                       font=("Courier", 10), foreground="#003366").grid(row=i, column=1, sticky="w", padx=(2, 6), pady=1)
 
-        # Raw UART log
         log_frame = ttk.Labelframe(left, text="Raw UART")
         log_frame.pack(side=tk.TOP, fill=tk.X, padx=2)
         self.log = tk.Text(log_frame, wrap=tk.NONE, height=3,
@@ -394,7 +402,6 @@ class App(tk.Tk):
         self.log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.log.tag_configure("vofa", foreground="#0088cc")
 
-        # Live plot
         plot_frame = ttk.Labelframe(main, text="Live Plot")
         main.add(plot_frame, weight=1)
 
@@ -406,14 +413,13 @@ class App(tk.Tk):
         self.l_des, = self.ax1.plot([], [], label="Desired")
         self.l_act, = self.ax1.plot([], [], label="Actual")
         self.ax1.legend(loc="upper right")
-        self.ax1.set_ylim(0,360)
+        self.ax1.set_ylim(-1500, 0)   # physical range E3..E5
         self.ax1.autoscale(enable=False, axis="y")
 
         self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
     def _build_sequencer_tab(self, parent):
-        # ── Left: controls ────────────────────────────────────────────────────
         ctrl = ttk.Frame(parent)
         ctrl.pack(side=tk.LEFT, fill=tk.Y, padx=12, pady=10)
 
@@ -433,7 +439,6 @@ class App(tk.Tk):
         self.tempo_label.pack(anchor="w", pady=(0, 10))
         tempo_slider.config(command=self._on_tempo_change)
 
-        # Play / Stop buttons
         btn_row = ttk.Frame(ctrl)
         btn_row.pack(anchor="w", pady=6)
         self.btn_play = ttk.Button(btn_row, text="▶  Play", width=12, command=self._seq_play)
@@ -442,25 +447,25 @@ class App(tk.Tk):
                                        command=self._seq_stop, state=tk.DISABLED)
         self.btn_stop_seq.pack(side=tk.LEFT)
 
-        # Progress
         ttk.Label(ctrl, text="Progress", font=("Helvetica", 10, "bold")).pack(anchor="w", pady=(12, 2))
         self.seq_progress = ttk.Progressbar(ctrl, length=180, mode="determinate")
         self.seq_progress.pack(anchor="w")
         self.seq_progress_lbl = ttk.Label(ctrl, text="—", font=("Courier", 9))
         self.seq_progress_lbl.pack(anchor="w", pady=(2, 10))
 
-        # Current note display
         self.seq_note_var = tk.StringVar(value="—")
         ttk.Label(ctrl, text="Playing", font=("Helvetica", 10, "bold")).pack(anchor="w")
         tk.Label(ctrl, textvariable=self.seq_note_var,
                  font=("Helvetica", 48, "bold"), fg="#1a2e5a", bg="#ddeeff",
                  width=6, anchor="center", relief=tk.GROOVE, pady=8).pack(fill=tk.X, pady=4)
 
-        # ── Right: score roll ─────────────────────────────────────────────────
+        # Key range label
+        ttk.Label(ctrl, text="Range: E3 – E5  (25 keys)",
+                  font=("Helvetica", 8), foreground="#666666").pack(anchor="w", pady=(8, 0))
+
         score_frame = ttk.Labelframe(parent, text="Song Score")
         score_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=8, pady=10)
 
-        # Scrollable listbox showing the full sequence
         sb = ttk.Scrollbar(score_frame)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.score_list = tk.Listbox(score_frame, yscrollcommand=sb.set,
@@ -469,12 +474,12 @@ class App(tk.Tk):
         self.score_list.pack(fill=tk.BOTH, expand=True)
         sb.config(command=self.score_list.yview)
 
-        # Custom song editor area
         edit_frame = ttk.Labelframe(parent, text="Custom Song Editor")
         edit_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8), pady=10)
 
         ttk.Label(edit_frame,
                   text="One note per line:  NOTE  DURATION_S\n"
+                       "Valid range: E3 to E5\n"
                        "Example:   C4  0.5\n"
                        "           G4  1.0\n"
                        "           E4  0.5",
@@ -489,7 +494,6 @@ class App(tk.Tk):
         ttk.Button(btn_custom_row, text="Load Custom", command=self._seq_load_custom).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(btn_custom_row, text="Clear", command=lambda: self.custom_text.delete("1.0", tk.END)).pack(side=tk.LEFT)
 
-        # Preload first song
         self._seq_load_song()
 
     # ── Song loading ──────────────────────────────────────────────────────────
@@ -515,7 +519,7 @@ class App(tk.Tk):
                 continue
             note, dur_str = parts
             try:
-                note_to_angle(note)   # validate
+                note_to_angle(note)
                 dur = float(dur_str)
                 song.append((note, dur))
             except Exception as e:
@@ -548,9 +552,7 @@ class App(tk.Tk):
         self.tempo_label.config(text=f"{v:.2f}×  ({int(v*100)}%)")
 
     def _scaled_song(self):
-        """Return the current song with durations scaled by tempo slider."""
         scale = self.tempo_scale.get()
-        # Higher scale = faster (shorter durations)
         return [(note, dur / scale) for note, dur in self._current_song]
 
     # ── Play / Stop ───────────────────────────────────────────────────────────
@@ -558,16 +560,12 @@ class App(tk.Tk):
         if not (self.reader and self.reader.is_alive()):
             messagebox.showwarning("Not connected", "Connect to serial port first.")
             return
-
         if self._seq_thread and self._seq_thread.is_alive():
-            return  # already playing
-
+            return
         self._seq_stop_evt.clear()
         song = self._scaled_song()
-
         self._seq_thread = Sequencer(song, self.reader, self.q, self._seq_stop_evt)
         self._seq_thread.start()
-
         self.btn_play.config(state=tk.DISABLED)
         self.btn_stop_seq.config(state=tk.NORMAL)
         self.seq_progress["maximum"] = len(song)
@@ -649,6 +647,7 @@ class App(tk.Tk):
         d_val   = float(m.group(7))
         tau_val = float(m.group(8))
         dir_val = int(m.group(9))
+        sw_val  = int(m.group(10)) if m.group(10) is not None else 0
 
         t_now = time.time() - self.t0
         self.t.append(t_now)
@@ -658,9 +657,10 @@ class App(tk.Tk):
         self.u.append(u_val)
 
         for field, val in zip(
-            ["Desired", "Actual", "Duty", "u", "P", "I", "D", "tau", "dir"],
-            [f"{desired:.3f}", f"{actual:.3f}", f"{duty:.3f}", f"{u_val:.3f}",
-             f"{p_val:.5f}", f"{i_val:.5f}", f"{d_val:.5f}", f"{tau_val:.5f}", str(dir_val)]
+            ["Desired", "Actual", "Duty", "u", "P", "I", "D", "tau", "dir", "sw"],
+            [f"{desired:.2f}", f"{actual:.2f}", f"{duty:.3f}", f"{u_val:.3f}",
+             f"{p_val:.5f}", f"{i_val:.5f}", f"{d_val:.5f}", f"{tau_val:.5f}",
+             str(dir_val), str(sw_val)]
         ):
             self._table_vars[field].set(val)
 
@@ -688,35 +688,27 @@ class App(tk.Tk):
                 if kind == "line":
                     self._handle_line(payload)
                     updated = True
-
                 elif kind == "vofa_cmd":
                     self._append_log(payload + "\n", tag="vofa")
-
                 elif kind == "status":
                     self.status_var.set(payload.strip())
                     self._append_log(payload)
-
                 elif kind == "error":
                     self.status_var.set(payload.strip())
                     self._append_log(payload)
-
-                # ── Sequencer events ──────────────────────────────────────────
                 elif kind == "seq_note":
                     idx, note, angle, total = payload
                     self.seq_note_var.set(note)
                     self.seq_progress["value"] = idx + 1
                     self.seq_progress_lbl.config(text=f"{idx+1} / {total}  ({note}  {angle:+.1f}°)")
-                    # Highlight current note in score list
                     self.score_list.selection_clear(0, tk.END)
                     self.score_list.selection_set(idx)
                     self.score_list.see(idx)
-
                 elif kind == "seq_done":
                     self.btn_play.config(state=tk.NORMAL)
                     self.btn_stop_seq.config(state=tk.DISABLED)
                     self.seq_note_var.set("✓")
                     self.status_var.set("Song finished.")
-
                 elif kind == "seq_stop":
                     self.btn_play.config(state=tk.NORMAL)
                     self.btn_stop_seq.config(state=tk.DISABLED)

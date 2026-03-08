@@ -21,15 +21,14 @@
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
-#include <stdio.h>
-#include <string.h>
-#include <math.h>
-#include <stdlib.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "PID.h"
-
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 
 /* USER CODE END Includes */
 
@@ -42,10 +41,10 @@
 /* USER CODE BEGIN PD */
 
 /* Controller parameters */
-#define PID_KP  0.045f
-#define PID_KI  0.0069f
-#define PID_KD  0.0065f
-#define PID_TAU 0.01f
+#define PID_KP  0.1912f
+#define PID_KI  0.2833f
+#define PID_KD  0.0163f
+#define PID_TAU 0.0913f
 
 #define PID_LIM_MIN -10.0f
 #define PID_LIM_MAX  10.0f
@@ -86,6 +85,13 @@ PIDController pid = {
 static uint8_t rxByte;
 static char rxLine[32];
 static uint8_t rxIdx = 0;
+
+/* Limit switch flag — set in EXTI callback, cleared in main loop */
+volatile uint8_t limitSwitchRight = 0;
+
+/* Direction state — file-scope so HAL_GPIO_EXTI_Callback can read dir_state */
+static int8_t dir_state = 0;
+static int8_t prev_dir  = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -105,26 +111,40 @@ static inline void PWM_SetDuty(TIM_HandleTypeDef *htim, uint32_t channel, float 
   */
 int main(void)
 {
+
   /* USER CODE BEGIN 1 */
   PIDController_Init(&pid);   // pid is declared globally above
   /* USER CODE END 1 */
 
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
+
+  /* USER CODE BEGIN Init */
+
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
   SystemClock_Config();
 
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
+
+  /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_TIM1_Init();
-  MX_TIM2_Init();
   MX_USART2_UART_Init();
   MX_TIM3_Init();
-
+  MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
-  HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
+  HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);   // REV (PA8)
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);   // FWD (PB4)
   HAL_UART_Receive_IT(&huart2, &rxByte, 1);
 
-  const int countsPerRev = 444;
+  const int countsPerRev = 700;
 
   float angleValue = 0.0f;
   float u = 0.0f;
@@ -132,32 +152,68 @@ int main(void)
 
   static int32_t prevRawCount = 0;
   static float   absAngle     = 0.0f;
-  prevRawCount = (int32_t)TIM2->CNT;   // seed with current position on boot
+  prevRawCount = (int32_t)TIM4->CNT;   // seed with current position on boot
 
   // Direction hysteresis thresholds (tune these if needed)
   const float U_ON  = 0.3f;   // start moving
-  const float U_OFF = 0.15f;  // stop moving
+  const float U_OFF = 0.05f;  // stop moving
 
   // Limit max duty (soften motion; reduce jitter)
-  const float DUTY_MAX = 0.7f;
+  const float DUTY_MAX = 0.5f;
 
   // Direction state machine
   int8_t dir = 0;
-  static int8_t dir_state = 0;
-  static int8_t prev_dir = 0;
 
   // Direction change deadtime (ms)
   const uint32_t DEADTIME_MS = 50;
 
   char printMessage[200];
-  char printMessage2[200];
 
   uint32_t lastTick = HAL_GetTick();
   uint32_t nextPrintTick = HAL_GetTick();
   /* USER CODE END 2 */
 
+  /* ── Homing routine ─────────────────────────────────────────────────── */
+  /* Step 1: move left at 30% for 1 second */
+  dir = -1;
+  PWM_SetDuty(&PWM_FWD_TIM, PWM_FWD_CH, 0.3f);
+  PWM_SetDuty(&PWM_REV_TIM, PWM_REV_CH, 0.0f);
+  HAL_Delay(500);
+  PWM_SetDuty(&PWM_FWD_TIM, PWM_FWD_CH, 0.0f);
+  HAL_Delay(50);
+
+  /* Step 2: creep right at 10% until limit switch fires */
+  dir = 1;
+  limitSwitchRight = (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) ? 0 : 1;
+  while (limitSwitchRight != 1)
+  {
+      PWM_SetDuty(&PWM_REV_TIM, PWM_REV_CH, 0.2f);
+      PWM_SetDuty(&PWM_FWD_TIM, PWM_FWD_CH, 0.0f);
+      HAL_Delay(5);
+      limitSwitchRight = (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) ? 0 : 1;
+  }
+
+  /* Step 3: stop and zero encoder origin */
+  PWM_SetDuty(&PWM_FWD_TIM, PWM_FWD_CH, 0.0f);
+  PWM_SetDuty(&PWM_REV_TIM, PWM_REV_CH, 0.0f);
+  angleValue           = 0.0f;
+  desiredAngle       = 0.0f;
+  prevRawCount       = (int32_t)TIM4->CNT;
+  pid.integrator     = 0.0f;
+  pid.differentiator = 0.0f;
+  dir_state          = 0;
+  prev_dir           = 0;
+  limitSwitchRight   = 0;
+  HAL_Delay(200);
+  /* ── End homing ──────────────────────────────────────────────────────── */
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+
   while (1)
   {
+    /* USER CODE END WHILE */
+
     /* USER CODE BEGIN 3 */
 
     // --- 1) Enforce fixed sample time ---
@@ -168,7 +224,7 @@ int main(void)
     lastTick = now;
 
     // --- 2) Read encoder as absolute linear position (no 0-360 wraparound) ---
-    int32_t rawCount = (int32_t)TIM2->CNT;
+    int32_t rawCount = (int32_t)TIM4->CNT;
 
     // Detect 16-bit counter rollover and accumulate
     int32_t delta = rawCount - prevRawCount;
@@ -186,6 +242,7 @@ int main(void)
     duty_cmd = fabsf(u) / pid.limMax;
 
     if (duty_cmd > DUTY_MAX) duty_cmd = DUTY_MAX;
+    if (duty_cmd < 0.15f) duty_cmd = 0.0f;
     //duty_cmd = 1.0f;
 
     // --- 5) Direction hysteresis state machine (prevents chatter) ---
@@ -202,7 +259,20 @@ int main(void)
 
     dir = dir_state;
 
-    // dir = 1;
+    // --- 5b) Right limit switch override ---
+    // PA0 reads HIGH (3.3V) when switch is pressed = touching right wall.
+    // FWD channel (PB4, dir < 0) is rightward — block that direction.
+    limitSwitchRight = (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) ? 0 : 1;
+
+    if (limitSwitchRight && dir > 0)
+    {
+        dir       = 0;
+        dir_state = 0;
+        duty_cmd  = 0.0f;
+        pid.integrator = 0.0f;   // prevent integrator wind-up against the wall
+        absAngle = 0;
+        desiredAngle = 0;
+    }
 
     // If stopped, force duty to 0
     if (dir == 0) duty_cmd = 0.0f;
@@ -237,16 +307,16 @@ int main(void)
         nextPrintTick = now + 10;
 
         int n = snprintf(printMessage, sizeof(printMessage),
-                         "Desired, Actual, Duty, u, P, I, D, tau, dir: %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %d\r\n",
-                         desiredAngle, angleValue, duty_cmd, u, pid.Kp, pid.Ki, pid.Kd, pid.tau, dir);
+                         "Desired, Actual, Duty, u, P, I, D, tau, dir: %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %d, %d\r\n",
+                         desiredAngle, angleValue, duty_cmd, u, pid.Kp, pid.Ki, pid.Kd, limitSwitchRight, dir);
         if (n > 0) {
             HAL_UART_Transmit(&huart2, (uint8_t*)printMessage, (uint16_t)strlen(printMessage), 300);
         }
     }
 
-    /* USER CODE END 3 */
-  }
-}
+  /* USER CODE END 3 */
+  }   /* while(1) */
+}     /* main() */
 
 /**
   * @brief System Clock Configuration
@@ -379,6 +449,22 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         }
 
         HAL_UART_Receive_IT(&huart2, &rxByte, 1);
+    }
+}
+
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    if (GPIO_Pin == GPIO_PIN_0)
+    {
+        /* Rising edge = switch pressed = touching right wall.
+           Kill PWM outputs immediately (don't wait for the next 10 ms sample). */
+        if (dir_state < 0)   /* dir < 0 = FWD channel = rightward */
+        {
+            PWM_SetDuty(&PWM_FWD_TIM, PWM_FWD_CH, 0.0f);
+            PWM_SetDuty(&PWM_REV_TIM, PWM_REV_CH, 0.0f);
+        }
+        limitSwitchRight = 1;
     }
 }
 
