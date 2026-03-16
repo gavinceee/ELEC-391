@@ -57,11 +57,14 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-#define LED0_Pin GPIO_PIN_13
-#define LED0_GPIO_Port GPIOC
 
 /* USER CODE BEGIN Private defines */
-
+#define SR_DATA_Pin        GPIO_PIN_0
+#define SR_DATA_GPIO_Port  GPIOB
+#define SR_CLK_Pin         GPIO_PIN_1
+#define SR_CLK_GPIO_Port   GPIOB
+#define SR_LATCH_Pin       GPIO_PIN_7
+#define SR_LATCH_GPIO_Port GPIOA
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus
