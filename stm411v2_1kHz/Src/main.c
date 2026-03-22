@@ -91,6 +91,8 @@ volatile float duty_cmd = 0.0f;
 volatile float control_u = 0.0f;
 volatile int8_t dir = 0;
 
+static volatile uint8_t homingRequest = 0U;
+
 PIDController pid =
 {
     PID_KP,
