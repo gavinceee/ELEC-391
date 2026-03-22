@@ -91,8 +91,6 @@ volatile float duty_cmd = 0.0f;
 volatile float control_u = 0.0f;
 volatile int8_t dir = 0;
 
-static volatile uint8_t homingRequest = 0U;
-
 PIDController pid =
 {
     PID_KP,
@@ -115,8 +113,12 @@ static uint8_t rxIdx = 0;
 static volatile int8_t dir_state = 0;
 static volatile int8_t applied_dir = 0;
 static volatile uint16_t deadtimeTicks = 0U;
+
 static volatile uint8_t controlEnabled = 0U;
+
 static volatile uint8_t homingActive = 0U;
+static volatile uint8_t homingRequest = 0U;
+
 static volatile int32_t prevRawCount = 0;
 static volatile float absAngle = 0.0f;
 
@@ -326,7 +328,7 @@ static void Send_Telemetry(void)
     int n = snprintf(
         printMessage,
         sizeof(printMessage),
-        "%.3f, %.3f, %.3f, %.3f, %.5f, %.5f, %.5f, %.5f, %d, %d\r\n",
+        "%.3f, %.3f, %.3f, %.3f, %.5f, %.5f, %.5f, %.5f, %d, %d, %d\r\n",
         desiredAngle,
         actualAngle,
         duty_cmd,
@@ -336,7 +338,8 @@ static void Send_Telemetry(void)
         pid.differentiator,
         pid.tau,
         dir,
-		Read_Right_Limit_Switch()
+		Read_Right_Limit_Switch(),
+		(int)homingActive
     );
 
     if (n > 0)
@@ -374,8 +377,9 @@ static void Run_Homing_Routine(void)
 {
     uint32_t startTick;
 
-    controlEnabled = 0U;
-    homingActive = 1U;
+    homingActive = 0U;
+    Send_Telemetry();
+    controlEnabled = 1U;
 
     PWM_SetDuty(&PWM_FWD_TIM, PWM_FWD_CH, 0.0f);
     PWM_SetDuty(&PWM_REV_TIM, PWM_REV_CH, 0.0f);
@@ -409,6 +413,7 @@ static void Run_Homing_Routine(void)
     {
         PWM_SetDuty(&PWM_REV_TIM, PWM_FWD_CH, HOMING_MOVE_AWAY_DUTY);
         PWM_SetDuty(&PWM_FWD_TIM, PWM_REV_CH, 0.0f);
+
         HAL_Delay(1);
     }
 
@@ -437,6 +442,7 @@ static void Run_Homing_Routine(void)
 
     homingActive = 0U;
     controlEnabled = 1U;
+    Send_Telemetry();
 }
 
 /* USER CODE END 0 */
