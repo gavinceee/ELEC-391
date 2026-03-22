@@ -49,19 +49,9 @@
 #define PWM_FWD_TIM      htim1
 #define PWM_FWD_CH       TIM_CHANNEL_4   /* PA11 */
 
-/* Solenoid output */
-/* 74HC595 pins
-   PB5 = data
-   PB3 = clock
-   PA15 = latch */
-#define SR595_DATA_GPIO_Port   GPIOB
-#define SR595_DATA_Pin         GPIO_PIN_5
-
-#define SR595_CLK_GPIO_Port    GPIOB
-#define SR595_CLK_Pin          GPIO_PIN_3
-
-#define SR595_LATCH_GPIO_Port  GPIOA
-#define SR595_LATCH_Pin        GPIO_PIN_15
+/* Solenoid output: direct GPIO on PB5 */
+#define SOLENOID_GPIO_Port   GPIOB
+#define SOLENOID_Pin         GPIO_PIN_5
 
 /* Limit switch */
 #define LIMIT_SW_GPIO_Port GPIOA
@@ -192,17 +182,11 @@ static inline void Solenoid_Set(uint8_t on)
 {
     solenoidState = (on != 0U) ? 1U : 0U;
 
-    if (solenoidState)
-    {
-        /* For now: SL=1 turns on logical solenoid 1 only.
-           In your SR595 mapping, logical solenoid 1 is bit 0. */
-        SR595_Clear(&hsr595);
-        SR595_SetBit(&hsr595, 0U, true);
-    }
-    else
-    {
-        SR595_Clear(&hsr595);
-    }
+    HAL_GPIO_WritePin(
+        SOLENOID_GPIO_Port,
+        SOLENOID_Pin,
+        (solenoidState != 0U) ? GPIO_PIN_SET : GPIO_PIN_RESET
+    );
 }
 
 static inline uint8_t Read_Right_Limit_Switch(void)
@@ -393,7 +377,6 @@ static void Start_Peripherals(void)
 
     HAL_UART_Receive_IT(&huart2, &rxByte, 1);
 
-    SR595_Init(&hsr595);
     Solenoid_Set(0U);
     controlEnabled = 1U;
 }
