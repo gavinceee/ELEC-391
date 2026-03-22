@@ -299,6 +299,18 @@ static void VOFA_ParseCommand(const char *line)
             snprintf(ack, sizeof(ack), "ACK SL=0\r\n");
         }
     }
+    else if (strcmp(prefix, "RE") == 0)
+    {
+        if (val >= 0.5f)
+        {
+            homingRequest = 1U;
+            snprintf(ack, sizeof(ack), "ACK RE=1\r\n");
+        }
+        else
+        {
+            snprintf(ack, sizeof(ack), "ACK RE=0\r\n");
+        }
+    }
     else
     {
         snprintf(ack, sizeof(ack), "ERR unknown cmd: %s\r\n", prefix);
@@ -473,6 +485,12 @@ int main(void)
   while (1)
   {
 	  uint32_t now = HAL_GetTick();
+
+	    if (homingRequest != 0U)
+	    {
+	        homingRequest = 0U;
+	        Run_Homing_Routine();
+	    }
 
 	  if ((uint32_t)(now - nextPrintTick) >= TELEMETRY_MS)
 	  {
