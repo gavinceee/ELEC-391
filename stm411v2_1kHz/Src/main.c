@@ -12,6 +12,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "PID.h"
+#include "sr595.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -49,8 +50,18 @@
 #define PWM_FWD_CH       TIM_CHANNEL_4   /* PA11 */
 
 /* Solenoid output */
-#define SOLENOID_GPIO_Port GPIOB
-#define SOLENOID_Pin       GPIO_PIN_5
+/* 74HC595 pins
+   PB5 = data
+   PB3 = clock
+   PA15 = latch */
+#define SR595_DATA_GPIO_Port   GPIOB
+#define SR595_DATA_Pin         GPIO_PIN_5
+
+#define SR595_CLK_GPIO_Port    GPIOB
+#define SR595_CLK_Pin          GPIO_PIN_3
+
+#define SR595_LATCH_GPIO_Port  GPIOA
+#define SR595_LATCH_Pin        GPIO_PIN_15
 
 /* Limit switch */
 #define LIMIT_SW_GPIO_Port GPIOA
@@ -131,6 +142,17 @@ static volatile uint16_t uartTxChunkLen = 0U;
 static volatile uint8_t uartTxBusy = 0U;
 
 static char printMessage[128];
+
+static SR595_HandleTypeDef hsr595 =
+{
+    .data_port  = SR595_DATA_GPIO_Port,
+    .data_pin   = SR595_DATA_Pin,
+    .clk_port   = SR595_CLK_GPIO_Port,
+    .clk_pin    = SR595_CLK_Pin,
+    .latch_port = SR595_LATCH_GPIO_Port,
+    .latch_pin  = SR595_LATCH_Pin,
+    .state      = 0x00
+};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -170,14 +192,16 @@ static inline void Solenoid_Set(uint8_t on)
 {
     solenoidState = (on != 0U) ? 1U : 0U;
 
-    /* Active-low, copied from the F103 behavior */
     if (solenoidState)
     {
-        HAL_GPIO_WritePin(SOLENOID_GPIO_Port, SOLENOID_Pin, GPIO_PIN_RESET);
+        /* For now: SL=1 turns on logical solenoid 1 only.
+           In your SR595 mapping, logical solenoid 1 is bit 0. */
+        SR595_Clear(&hsr595);
+        SR595_SetBit(&hsr595, 0U, true);
     }
     else
     {
-        HAL_GPIO_WritePin(SOLENOID_GPIO_Port, SOLENOID_Pin, GPIO_PIN_SET);
+        SR595_Clear(&hsr595);
     }
 }
 
@@ -369,6 +393,7 @@ static void Start_Peripherals(void)
 
     HAL_UART_Receive_IT(&huart2, &rxByte, 1);
 
+    SR595_Init(&hsr595);
     Solenoid_Set(0U);
     controlEnabled = 1U;
 }
@@ -377,9 +402,9 @@ static void Run_Homing_Routine(void)
 {
     uint32_t startTick;
 
-    homingActive = 0U;
+    homingActive = 1U;
     Send_Telemetry();
-    controlEnabled = 1U;
+    controlEnabled = 0U;
 
     PWM_SetDuty(&PWM_FWD_TIM, PWM_FWD_CH, 0.0f);
     PWM_SetDuty(&PWM_REV_TIM, PWM_REV_CH, 0.0f);
@@ -411,7 +436,7 @@ static void Run_Homing_Routine(void)
 
     while (Read_Right_Limit_Switch() == 0U)
     {
-        PWM_SetDuty(&PWM_REV_TIM, PWM_FWD_CH, HOMING_MOVE_AWAY_DUTY);
+        PWM_SetDuty(&PWM_REV_TIM, PWM_FWD_CH, 0.5);
         PWM_SetDuty(&PWM_FWD_TIM, PWM_REV_CH, 0.0f);
 
         HAL_Delay(1);
