@@ -338,7 +338,7 @@ static void Send_Telemetry(void)
         pid.differentiator,
         pid.tau,
         dir,
-		Read_Right_Limit_Switch(),
+		solenoidState,
 		(int)homingActive
     );
 
