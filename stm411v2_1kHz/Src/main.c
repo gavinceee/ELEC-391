@@ -12,7 +12,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "PID.h"
-#include "sr595.h"
+// #include "sr595.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -133,6 +133,7 @@ static volatile uint8_t uartTxBusy = 0U;
 
 static char printMessage[128];
 
+/*
 static SR595_HandleTypeDef hsr595 =
 {
     .data_port  = SR595_DATA_GPIO_Port,
@@ -143,6 +144,7 @@ static SR595_HandleTypeDef hsr595 =
     .latch_pin  = SR595_LATCH_Pin,
     .state      = 0x00
 };
+*/
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
