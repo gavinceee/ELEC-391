@@ -55,7 +55,7 @@ void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-void App_SysTickCallback(void);
+void Control_Loop_1kHz(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/

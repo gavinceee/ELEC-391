@@ -59,9 +59,15 @@
 /* Hysteresis / safety */
 #define U_ON              0.30f
 #define U_OFF             0.05f
-#define DUTY_MAX          1.00f
+#define DUTY_MAX          0.8f
 #define DUTY_MIN_ACTIVE   0.15f
 #define DEADTIME_MS       50U
+
+#define HOMING_MOVE_AWAY_DUTY   0.35f
+#define HOMING_SEEK_DUTY        0.30f
+#define HOMING_MOVE_AWAY_MS     250U
+#define HOMING_SETTLE_MS         30U
+#define HOMING_TIMEOUT_MS      4000U
 
 /* USER CODE END PD */
 
@@ -108,6 +114,7 @@ static volatile int8_t dir_state = 0;
 static volatile int8_t applied_dir = 0;
 static volatile uint16_t deadtimeTicks = 0U;
 static volatile uint8_t controlEnabled = 0U;
+static volatile uint8_t homingActive = 0U;
 static volatile int32_t prevRawCount = 0;
 static volatile float absAngle = 0.0f;
 
@@ -315,7 +322,7 @@ static void Send_Telemetry(void)
         pid.differentiator,
         pid.tau,
         dir,
-        solenoidState
+		Read_Right_Limit_Switch()
     );
 
     if (n > 0)
@@ -351,52 +358,71 @@ static void Start_Peripherals(void)
 
 static void Run_Homing_Routine(void)
 {
-    static int32_t prevRawCountLocal = 0;
-    static float absAngleLocal = 0.0f;
+    uint32_t startTick;
 
-    /* Move away from the switch briefly */
-    dir = -1;
-    PWM_SetDuty(&PWM_FWD_TIM, PWM_FWD_CH, 0.30f);
-    PWM_SetDuty(&PWM_REV_TIM, PWM_REV_CH, 0.00f);
-    HAL_Delay(500);
+    controlEnabled = 0U;
+    homingActive = 1U;
 
-    PWM_SetDuty(&PWM_FWD_TIM, PWM_FWD_CH, 0.00f);
-    PWM_SetDuty(&PWM_REV_TIM, PWM_REV_CH, 0.00f);
-    HAL_Delay(50);
+    PWM_SetDuty(&PWM_FWD_TIM, PWM_FWD_CH, 0.0f);
+    PWM_SetDuty(&PWM_REV_TIM, PWM_REV_CH, 0.0f);
 
-    /* Move toward the right limit switch */
-    dir = +1;
-    limitSwitchRight = Read_Right_Limit_Switch();
-
-    while (limitSwitchRight != 1U)
-    {
-        PWM_SetDuty(&PWM_REV_TIM, PWM_REV_CH, 0.20f);
-        PWM_SetDuty(&PWM_FWD_TIM, PWM_FWD_CH, 0.00f);
-        HAL_Delay(5);
-        limitSwitchRight = Read_Right_Limit_Switch();
-    }
-
-    PWM_SetDuty(&PWM_FWD_TIM, PWM_FWD_CH, 0.00f);
-    PWM_SetDuty(&PWM_REV_TIM, PWM_REV_CH, 0.00f);
-    Solenoid_Set(0U);
-
-    actualAngle         = 0.0f;
-    desiredAngle        = 0.0f;
-    control_u           = 0.0f;
-    duty_cmd            = 0.0f;
-    prevRawCountLocal   = (int32_t)TIM4->CNT;
-    absAngleLocal       = 0.0f;
     pid.integrator      = 0.0f;
     pid.differentiator  = 0.0f;
+    pid.prevError       = 0.0f;
+    pid.prevMeasurement = actualAngle;
+    control_u           = 0.0f;
+    duty_cmd            = 0.0f;
     dir_state           = 0;
-    applied_dir        = 0;
-    dir                 = 0;
-    limitSwitchRight    = 0U;
+    applied_dir         = 0;
+    deadtimeTicks       = 0U;
+    limitSwitchRight    = Read_Right_Limit_Switch();
 
-    HAL_Delay(200);
+    /* If already sitting on the home switch, back off first so the next hit is real. */
+	dir = -1;
+	PWM_SetDuty(&PWM_FWD_TIM, PWM_REV_CH, HOMING_MOVE_AWAY_DUTY);
+	PWM_SetDuty(&PWM_REV_TIM, PWM_FWD_CH, 0.0f);
+	HAL_Delay(HOMING_MOVE_AWAY_MS);
 
-    (void)prevRawCountLocal;
-    (void)absAngleLocal;
+	PWM_SetDuty(&PWM_FWD_TIM, PWM_FWD_CH, 0.0f);
+	PWM_SetDuty(&PWM_REV_TIM, PWM_REV_CH, 0.0f);
+	HAL_Delay(HOMING_SETTLE_MS);
+
+    /* Seek toward the home switch. */
+    dir = +1;
+    startTick = HAL_GetTick();
+
+    while (Read_Right_Limit_Switch() == 0U)
+    {
+        PWM_SetDuty(&PWM_REV_TIM, PWM_FWD_CH, HOMING_MOVE_AWAY_DUTY);
+        PWM_SetDuty(&PWM_FWD_TIM, PWM_REV_CH, 0.0f);
+        HAL_Delay(1);
+    }
+
+    PWM_SetDuty(&PWM_FWD_TIM, PWM_FWD_CH, 0.0f);
+    PWM_SetDuty(&PWM_REV_TIM, PWM_REV_CH, 0.0f);
+    Solenoid_Set(0U);
+
+    TIM4->CNT            = 0U;
+    prevRawCount         = 0;
+    absAngle             = 0.0f;
+    actualAngle          = 0.0f;
+    desiredAngle         = 0.0f;
+    control_u            = 0.0f;
+    duty_cmd             = 0.0f;
+    pid.integrator       = 0.0f;
+    pid.differentiator   = 0.0f;
+    pid.prevError        = 0.0f;
+    pid.prevMeasurement  = 0.0f;
+    dir_state            = 0;
+    applied_dir          = 0;
+    dir                  = 0;
+    deadtimeTicks        = 0U;
+    limitSwitchRight     = Read_Right_Limit_Switch();
+
+    HAL_Delay(100);
+
+    homingActive = 0U;
+    controlEnabled = 1U;
 }
 
 /* USER CODE END 0 */
@@ -435,7 +461,8 @@ int main(void)
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
   Start_Peripherals();
-  // Run_Homing_Routine();
+  Run_Homing_Routine();
+  Start_Peripherals();
 
   uint32_t nextPrintTick = HAL_GetTick();
 
@@ -771,7 +798,14 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
     if (GPIO_Pin == LIMIT_SW_Pin)
     {
-        if (dir > 0)
+        limitSwitchRight = Read_Right_Limit_Switch();
+
+        if (homingActive != 0U)
+        {
+            return;
+        }
+
+        if ((limitSwitchRight != 0U) && (dir < 0))
         {
             PWM_SetDuty(&PWM_FWD_TIM, PWM_FWD_CH, 0.0f);
             PWM_SetDuty(&PWM_REV_TIM, PWM_REV_CH, 0.0f);
@@ -781,10 +815,15 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
             duty_cmd = 0.0f;
             control_u = 0.0f;
             deadtimeTicks = 0U;
+            pid.integrator = 0.0f;
+            pid.differentiator = 0.0f;
+            pid.prevError = 0.0f;
+            pid.prevMeasurement = actualAngle;
+            absAngle = 0.0f;
+            actualAngle = 0.0f;
+            desiredAngle = 0.0f;
+            Solenoid_Set(0U);
         }
-
-        limitSwitchRight = 1U;
-        Solenoid_Set(0U);
     }
 }
 
@@ -857,7 +896,7 @@ void Control_Loop_1kHz(void)
     dir_state = requested_dir;
     limitSwitchRight = Read_Right_Limit_Switch();
 
-    if ((limitSwitchRight != 0U) && (requested_dir > 0))
+    if ((limitSwitchRight != 0U) && (requested_dir < 0))
     {
         requested_dir       = 0;
         dir_state           = 0;
