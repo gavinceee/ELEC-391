@@ -344,8 +344,8 @@ static void Send_Telemetry(void)
         duty_cmd,
         control_u,
         pid.Kp,
-        pid.integrator,
-        pid.differentiator,
+        pid.Ki,
+        pid.Kd,
         pid.tau,
         dir,
 		solenoidState,
@@ -491,8 +491,8 @@ int main(void)
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
   Start_Peripherals();
-  Run_Homing_Routine();
-  Start_Peripherals();
+  //Run_Homing_Routine();
+  //Start_Peripherals();
 
   uint32_t nextPrintTick = HAL_GetTick();
 
