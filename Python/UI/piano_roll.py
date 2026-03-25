@@ -2,6 +2,11 @@ import tkinter as tk
 
 NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
 
+try:
+    from Core_function.note import note_to_angle
+except Exception:
+    note_to_angle = None
+
 
 def midi_to_name(note_num: int) -> str:
     pitch = NOTE_NAMES[note_num % 12]
@@ -57,12 +62,9 @@ class PianoRollView(tk.Canvas):
 
     NOTE_SIDE_PAD = 3
 
-    # 动态 gap 的 clamp 范围
-    MIN_PRE_GAP_S = 0.02
-    MAX_PRE_GAP_S = 0.18
-
-    # 防止短音被裁没
-    MIN_VISIBLE_NOTE_S = 0.05
+    # 预测 move_time 的 clamp
+    MIN_MOVE_S = 0.10
+    MAX_MOVE_S = 1.20
 
     def __init__(self, master, start_note="C3", octaves=4, **kwargs):
         super().__init__(
@@ -151,7 +153,10 @@ class PianoRollView(tk.Canvas):
             move_time = max(0.0, float(move_time))
         except (TypeError, ValueError):
             return
-        self.song_events[idx]["move_time"] = move_time
+
+        ev = self.song_events[idx]
+        ev["move_time"] = move_time
+        ev["preview_start"] = ev["start"] - move_time
         self.redraw()
 
     def set_note_actual_press(self, idx: int, elapsed: float):
@@ -183,7 +188,6 @@ class PianoRollView(tk.Canvas):
         self.status_text = "Stopped"
 
         for ev in self.song_events:
-            ev["move_time"] = 0.0
             ev["actual_start"] = None
             ev["actual_end"] = None
 
@@ -226,26 +230,85 @@ class PianoRollView(tk.Canvas):
         px_per_sec = self._lane_height() / self.seconds_visible
         return self._lane_bottom() - dt * px_per_sec
 
-    def _build_song_events(self, song):
-        t = 0.0
-        events = []
+    # -------------------------
+    # Timing model
+    # -------------------------
+    def _estimate_move_time(self, prev_playable_note, note):
+        if note == "REST":
+            return 0.0
 
+        # 优先按真实角度差来估计
+        if note_to_angle is not None:
+            try:
+                cur_angle = float(note_to_angle(note))
+                if prev_playable_note is None:
+                    mt = 0.18 + 0.00055 * abs(cur_angle)
+                else:
+                    prev_angle = float(note_to_angle(prev_playable_note))
+                    mt = 0.08 + 0.00100 * abs(cur_angle - prev_angle)
+                return max(self.MIN_MOVE_S, min(self.MAX_MOVE_S, mt))
+            except Exception:
+                pass
+
+        # 兜底：按 MIDI 音高差估计
+        try:
+            if prev_playable_note is None:
+                interval = abs(name_to_midi(note) - name_to_midi(self.start_note))
+                mt = 0.22 + 0.035 * interval
+            else:
+                interval = abs(name_to_midi(note) - name_to_midi(prev_playable_note))
+                mt = 0.08 + 0.03 * interval
+        except Exception:
+            mt = 0.45 if prev_playable_note is None else 0.18
+
+        return max(self.MIN_MOVE_S, min(self.MAX_MOVE_S, mt))
+
+    def _build_song_events(self, song):
+        raw_events = []
+        t = 0.0
+        prev_playable_note = None
+        global_offset = 0.0
+
+        # 第一遍：先算 raw start 和每颗音预测 move_time
         for idx, (note, duration) in enumerate(song):
+            note = str(note).strip().upper()
             dur = max(0.01, float(duration))
-            start = t
-            end = t + dur
+            raw_start = t
+            raw_end = t + dur
+
+            move_time = self._estimate_move_time(prev_playable_note, note)
+
+            if note != "REST":
+                global_offset = max(global_offset, move_time - raw_start)
+                prev_playable_note = note
+
+            raw_events.append({
+                "index": idx,
+                "note": note,
+                "raw_start": raw_start,
+                "raw_end": raw_end,
+                "duration": dur,
+                "move_time": move_time,
+            })
+            t = raw_end
+
+        # 第二遍：整体右移，保证不会一开场就出现“条已经在底线下面”
+        events = []
+        for ev in raw_events:
+            start = ev["raw_start"] + global_offset
+            end = ev["raw_end"] + global_offset
 
             events.append({
-                "index": idx,
-                "note": str(note).strip().upper(),
-                "start": start,
-                "end": end,
-                "duration": dur,
-                "move_time": 0.0,
+                "index": ev["index"],
+                "note": ev["note"],
+                "start": start,                     # 计划 hit_time
+                "end": end,                         # 计划 slot end
+                "duration": ev["duration"],
+                "move_time": ev["move_time"],
+                "preview_start": start - ev["move_time"],
                 "actual_start": None,
                 "actual_end": None,
             })
-            t = end
 
         return events
 
@@ -327,22 +390,16 @@ class PianoRollView(tk.Canvas):
 
             x0, x1 = x
 
-            move_time = float(ev.get("move_time", 0.0))
-            actual_start = ev.get("actual_start")
-            actual_end = ev.get("actual_end")
+            preview_start = float(ev.get("preview_start", ev["start"]))
+            # 一旦真实按下，就立即消失；否则按计划 hit_time 落到底线
+            hit_time = ev["actual_start"] if ev.get("actual_start") is not None else ev["start"]
 
-            # 还没收到真实 press/release 时，先用谱面时间兜底
-            if actual_start is None:
-                actual_start = ev["start"]
-            if actual_end is None:
-                actual_end = actual_start + ev["duration"]
+            # 已经 press 过了，就不再画这个预告条
+            if self.play_time >= hit_time:
+                continue
 
-            # 可见 block 从 move_time 阶段就开始下落
-            draw_start = actual_start - move_time
-            draw_end = actual_end
-
-            y0 = self._time_to_y(draw_start)
-            y1 = self._time_to_y(draw_end)
+            y0 = self._time_to_y(preview_start)
+            y1 = self._time_to_y(hit_time)
 
             top = min(y0, y1)
             bottom = max(y0, y1)
@@ -356,8 +413,7 @@ class PianoRollView(tk.Canvas):
             if bottom - top < 2:
                 continue
 
-            # 只有真正碰到键盘后才算 active / 发声
-            active_now = actual_start <= self.play_time <= actual_end
+            active_now = (self.current_note == note)
 
             self._draw_single_note_block(
                 x0 + self.NOTE_SIDE_PAD,

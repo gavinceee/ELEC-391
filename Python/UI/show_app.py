@@ -41,6 +41,7 @@ class ShowApp(tk.Tk):
 
         self._seq_thread = None
         self._seq_stop_evt = threading.Event()
+        self._seq_pause_evt = threading.Event()
 
         self.latest_actual = None
         self.latest_desired = None
@@ -58,6 +59,9 @@ class ShowApp(tk.Tk):
 
         self._connected = False
         self._pressed_note = None
+
+        self._pause_song_time = None
+        self._pause_started_at = None
 
         self._right_panel_mode = "state"
         self._live_log_max_lines = 200
@@ -150,8 +154,14 @@ class ShowApp(tk.Tk):
         self.btn_play = ttk.Button(playback_box, text="Play", command=self._seq_play, width=10)
         self.btn_play.pack(side=tk.LEFT, padx=4)
 
-        self.btn_stop = ttk.Button(playback_box, text="Stop", command=self._seq_stop, width=10, state=tk.DISABLED)
-        self.btn_stop.pack(side=tk.LEFT, padx=4)
+        self.btn_pause_resume = ttk.Button(
+            playback_box,
+            text="Pause",
+            command=self._seq_toggle_pause,
+            width=10,
+            state=tk.DISABLED
+        )
+        self.btn_pause_resume.pack(side=tk.LEFT, padx=4)
 
         self.btn_reset = ttk.Button(playback_box, text="Reset", command=self._seq_reset, width=10)
         self.btn_reset.pack(side=tk.LEFT, padx=4)
@@ -212,7 +222,6 @@ class ShowApp(tk.Tk):
         right.pack(side=tk.RIGHT, fill=tk.Y, padx=(12, 0))
         right.pack_propagate(False)
 
-        # ── top toggle bar ─────────────────────────────────────────
         toggle_bar = tk.Frame(right, bg="#11161e")
         toggle_bar.pack(fill=tk.X, padx=14, pady=(16, 8))
 
@@ -248,16 +257,12 @@ class ShowApp(tk.Tk):
         )
         self.btn_log_panel.pack(side=tk.LEFT)
 
-        # ── shared top panel area ─────────────────────────────────
-        self.top_panel_host = tk.Frame(right, bg="#11161e", height=290)
+        self.top_panel_host = tk.Frame(right, bg="#11161e", height=300)
         self.top_panel_host.pack(fill=tk.X, padx=14, pady=(0, 10))
         self.top_panel_host.pack_propagate(False)
 
-        # state panel
         self.state_panel = tk.Frame(self.top_panel_host, bg="#11161e")
         self.state_panel.place(relx=0, rely=0, relwidth=1, relheight=1)
-
-
 
         self.machine_vars = {}
         fields = [
@@ -297,7 +302,6 @@ class ShowApp(tk.Tk):
                 font=("Consolas", 10, "bold")
             ).pack(side=tk.RIGHT)
 
-        # live log panel
         self.log_panel = tk.Frame(self.top_panel_host, bg="#11161e")
         self.log_panel.place(relx=0, rely=0, relwidth=1, relheight=1)
 
@@ -330,7 +334,6 @@ class ShowApp(tk.Tk):
 
         self._show_state_panel()
 
-        # ── bottom editor area ────────────────────────────────────
         editor_frame = tk.Frame(right, bg="#11161e")
         editor_frame.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 16))
 
@@ -470,6 +473,8 @@ class ShowApp(tk.Tk):
         self._clear_play_ui_state()
 
         self.piano_view.set_song(self._current_song_name, self._current_song)
+        self._planned_total_s = self.piano_view.song_total_duration
+        self._song_total_s = self._planned_total_s
         self._update_header_labels()
         self._set_play_state("Stopped")
 
@@ -538,6 +543,7 @@ class ShowApp(tk.Tk):
             return
 
         self._seq_stop_evt.clear()
+        self._seq_pause_evt.clear()
         scaled_song = self._scaled_song()
 
         self._planned_total_s = sum(max(0.01, float(d)) for _, d in scaled_song)
@@ -552,16 +558,45 @@ class ShowApp(tk.Tk):
             reader=self.reader,
             out_q=self.q,
             stop_evt=self._seq_stop_evt,
+            pause_evt=self._seq_pause_evt,
             get_actual_fn=lambda: self.latest_actual,
         )
         self._seq_thread.start()
 
-        self.btn_stop.config(state=tk.NORMAL)
+        self.btn_play.config(state=tk.DISABLED)
+        self.btn_pause_resume.config(state=tk.NORMAL, text="Pause")
         self._set_play_state("Playing")
 
+    def _seq_pause(self):
+        if not (self._seq_thread and self._seq_thread.is_alive()):
+            return
+        if self._seq_pause_evt.is_set():
+            return
+
+        self._seq_pause_evt.set()
+        self.btn_pause_resume.config(text="Resume", state=tk.NORMAL)
+
+    def _seq_resume(self):
+        if not (self._seq_thread and self._seq_thread.is_alive()):
+            return
+        if not self._seq_pause_evt.is_set():
+            return
+
+        self._seq_pause_evt.clear()
+        self.btn_pause_resume.config(text="Pause", state=tk.NORMAL)
+
+    def _seq_toggle_pause(self):
+        if not (self._seq_thread and self._seq_thread.is_alive()):
+            return
+
+        if self._seq_pause_evt.is_set():
+            self._seq_resume()
+        else:
+            self._seq_pause()
 
     def _seq_stop(self):
         self._seq_stop_evt.set()
+        self._seq_pause_evt.clear()
 
         try:
             if self.reader and self.reader.is_alive():
@@ -571,12 +606,16 @@ class ShowApp(tk.Tk):
 
         self._pressed_note = None
         self.piano_view.set_pressed_note(None)
-        self.btn_stop.config(state=tk.DISABLED)
+
+        self.btn_play.config(state=tk.NORMAL)
+        self.btn_pause_resume.config(state=tk.DISABLED, text="Pause")
 
         self._append_live_log(f"{self._log_time_prefix()} Stop pressed")
 
     def _seq_reset(self):
-        self._seq_stop()
+    # fully terminate current playback
+        self._seq_stop_evt.set()
+        self._seq_pause_evt.clear()
 
         try:
             if self.reader and self.reader.is_alive():
@@ -585,11 +624,24 @@ class ShowApp(tk.Tk):
         except Exception:
             pass
 
+        self._pause_started_at = None
+        self._pause_song_time = None
+
+        self._pressed_note = None
+        self.piano_view.set_pressed_note(None)
+
+        self.btn_play.config(state=tk.NORMAL)
+        self.btn_pause_resume.config(state=tk.DISABLED, text="Pause")
+
         self._clear_play_ui_state()
         self.piano_view.reset_view()
         self.piano_view.set_song(self._current_song_name, self._scaled_song())
+        self._planned_total_s = self.piano_view.song_total_duration
+        self._song_total_s = self._planned_total_s
+        self._update_header_labels()
         self._set_play_state("Homing...")
-        self.btn_stop.config(state=tk.DISABLED)
+
+        self._append_live_log(f"{self._log_time_prefix()} Reset / Homing")
 
     def _refresh_ports(self):
         self.port_combo["values"] = list_serial_ports()
@@ -703,7 +755,6 @@ class ShowApp(tk.Tk):
                     reached = bool(payload.get("reached", False))
                     note = str(payload.get("note", "?"))
 
-                    target_angle = payload.get("target_angle", None)
                     actual_angle = payload.get("actual_angle", None)
                     angle_error = payload.get("angle_error", None)
 
@@ -716,6 +767,7 @@ class ShowApp(tk.Tk):
                         self.machine_vars["Move Error"].set(f"{angle_error:+.1f}°")
 
                     self.piano_view.set_move_info(move_time, reached)
+                    self.piano_view.set_note_move_time(idx, move_time)
 
                     if note != "REST":
                         extra_parts = []
@@ -764,6 +816,52 @@ class ShowApp(tk.Tk):
                         blank_after=True
                     )
 
+                elif kind == "seq_paused":
+                    paused_elapsed = float(payload.get("elapsed", self._current_time_s))
+                    self._current_time_s = paused_elapsed
+                    self._song_total_s = max(self._song_total_s, self._current_time_s)
+                    self.piano_view.set_play_time(self._current_time_s)
+                    self._update_header_labels()
+
+                    self._pause_song_time = paused_elapsed
+                    self._pause_started_at = time.perf_counter()
+
+                    self._pressed_note = None
+                    self.piano_view.set_pressed_note(None)
+
+                    self._set_play_state("Paused")
+                    self._append_live_log(
+                        f"{self._log_time_prefix()} Paused at song t={paused_elapsed:.2f}s"
+    )
+
+                elif kind == "seq_resumed":
+                    resumed_elapsed = float(payload.get("elapsed", self._current_time_s))
+                    paused_for = payload.get("paused_for", None)
+
+                    if paused_for is None:
+                        if self._pause_started_at is not None:
+                            paused_for = time.perf_counter() - self._pause_started_at
+                        else:
+                            paused_for = 0.0
+                    else:
+                        paused_for = float(paused_for)
+
+                    paused_song_t = self._pause_song_time
+                    if paused_song_t is None:
+                        paused_song_t = resumed_elapsed
+
+                    self._current_time_s = resumed_elapsed
+                    self.piano_view.set_play_time(self._current_time_s)
+                    self._update_header_labels()
+
+                    self._pause_started_at = None
+                    self._pause_song_time = None
+
+                    self._set_play_state("Playing")
+                    self._append_live_log(
+                        f"{self._log_time_prefix()} Resumed at song t={paused_song_t:.2f}s after {paused_for:.2f}s pause"
+                    )
+
                 elif kind == "seq_time":
                     self._current_time_s = float(payload)
                     self._song_total_s = max(self._planned_total_s, self._current_time_s)
@@ -785,7 +883,9 @@ class ShowApp(tk.Tk):
                     self.piano_view.set_play_time(self._current_time_s)
                     self._update_header_labels()
 
-                    self.btn_stop.config(state=tk.DISABLED)
+                    self.btn_play.config(state=tk.NORMAL)
+                    self.btn_pause_resume.config(state=tk.DISABLED, text="Pause")
+
                     self._set_play_state("Finished")
                     self._append_live_log(
                         f"{self._log_time_prefix()} Done ({final_elapsed:.2f}s)"
@@ -798,7 +898,9 @@ class ShowApp(tk.Tk):
 
                     self._pressed_note = None
                     self.piano_view.set_pressed_note(None)
-                    self.btn_stop.config(state=tk.DISABLED)
+
+                    self.btn_play.config(state=tk.NORMAL)
+                    self.btn_pause_resume.config(state=tk.DISABLED, text="Pause")  
 
                     self.piano_view.set_play_time(self._current_time_s)
                     self._song_total_s = max(self._song_total_s, self._current_time_s)

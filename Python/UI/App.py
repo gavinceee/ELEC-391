@@ -236,14 +236,7 @@ class App(tk.Tk):
         btn_row.pack(anchor="w", pady=6)
         self.btn_play = ttk.Button(btn_row, text="▶  Play", width=12, command=self._seq_play)
         self.btn_play.pack(side=tk.LEFT, padx=(0, 6))
-        self.btn_stop_seq = ttk.Button(
-            btn_row,
-            text="■  Stop",
-            width=12,
-            command=self._seq_stop,
-            state=tk.DISABLED
-        )
-        self.btn_stop_seq.pack(side=tk.LEFT)
+        
 
         ttk.Label(ctrl, text="Progress", font=("Helvetica", 10, "bold")).pack(anchor="w", pady=(12, 2))
         self.seq_progress = ttk.Progressbar(ctrl, length=180, mode="determinate")
@@ -398,7 +391,6 @@ class App(tk.Tk):
         self._seq_thread.start()
 
         self.btn_play.config(state=tk.DISABLED)
-        self.btn_stop_seq.config(state=tk.NORMAL)
         self.seq_progress["maximum"] = len(song)
         self.seq_progress["value"] = 0
         self.seq_progress_lbl.config(text=f"0 / {len(song)}")
@@ -413,7 +405,6 @@ class App(tk.Tk):
         except Exception:
             pass
 
-        self.btn_stop_seq.config(state=tk.DISABLED)
         self.btn_play.config(state=tk.NORMAL)
         self.seq_note_var.set("—")
         self.status_var.set("■ Stopped.")
@@ -577,13 +568,13 @@ class App(tk.Tk):
 
                 elif kind == "seq_done":
                     self.btn_play.config(state=tk.NORMAL)
-                    self.btn_stop_seq.config(state=tk.DISABLED)
+                    
                     self.seq_note_var.set("✓")
                     self.status_var.set("Song finished.")
 
                 elif kind == "seq_stop":
                     self.btn_play.config(state=tk.NORMAL)
-                    self.btn_stop_seq.config(state=tk.DISABLED)
+                    
 
         except queue.Empty:
             pass
