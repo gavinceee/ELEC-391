@@ -26,16 +26,27 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-/* Controller parameters */
-#define PID_KP           0.1912f
-#define PID_KI           0.2833f
-#define PID_KD           0.0163f
-#define PID_TAU          0.0913f
+/* Controller parameters - Motor 1 */
+#define PID_KP           0.7f
+#define PID_KI           0.0f
+#define PID_KD           0.0f
+#define PID_TAU          0.02f
 
 #define PID_LIM_MIN     -10.0f
 #define PID_LIM_MAX      10.0f
 #define PID_LIM_MIN_INT  -5.0f
 #define PID_LIM_MAX_INT   5.0f
+
+/* Controller parameters - Motor 2 */
+#define PID2_KP           0.2f
+#define PID2_KI           0.0f
+#define PID2_KD           0.0f
+#define PID2_TAU          0.02f
+
+#define PID2_LIM_MIN     -10.0f
+#define PID2_LIM_MAX      10.0f
+#define PID2_LIM_MIN_INT  -5.0f
+#define PID2_LIM_MAX_INT   5.0f
 
 #define SAMPLE_TIME_S    0.001f
 #define TELEMETRY_MS     10U
@@ -69,7 +80,7 @@
 /* Hysteresis / safety */
 #define U_ON              0.30f
 #define U_OFF             0.05f
-#define DUTY_MAX          0.8f
+#define DUTY_MAX          0.5f
 #define DUTY_MIN_ACTIVE   0.15f
 #define DEADTIME_MS       50U
 
@@ -135,14 +146,14 @@ volatile int8_t dir2 = 0;
 
 PIDController pid2 =
 {
-    PID_KP,
-    PID_KI,
-    PID_KD,
-    PID_TAU,
-    PID_LIM_MIN,
-    PID_LIM_MAX,
-    PID_LIM_MIN_INT,
-    PID_LIM_MAX_INT,
+    PID2_KP,
+    PID2_KI,
+    PID2_KD,
+    PID2_TAU,
+    PID2_LIM_MIN,
+    PID2_LIM_MAX,
+    PID2_LIM_MIN_INT,
+    PID2_LIM_MAX_INT,
     SAMPLE_TIME_S,
     0.0f,
     0.0f
@@ -583,7 +594,7 @@ int main(void)
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
   Start_Peripherals();
-  Run_Homing_Routine();
+  // Run_Homing_Routine();
 
 
   uint32_t nextCtrlTick  = HAL_GetTick();
