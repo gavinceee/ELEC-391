@@ -94,6 +94,15 @@
 #define HOMING_SETTLE_MS         30U
 #define HOMING_TIMEOUT_MS      4000U
 
+#define HOMING2_SEEK_DUTY           0.30f
+#define HOMING2_BACKOFF_DUTY        0.25f
+#define HOMING2_WINDOW_MS           50U
+#define HOMING2_STARTUP_IGNORE_MS   300U
+#define HOMING2_STALL_COUNTS        1
+#define HOMING2_STALL_CONFIRM_MS    300U
+#define HOMING2_BACKOFF_COUNTS      20U
+#define HOMING2_SETTLE_MS           30U
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -209,6 +218,7 @@ static inline void PWM_SetDuty(TIM_HandleTypeDef *htim, uint32_t channel, float 
 static void Solenoid_WriteMask(uint8_t mask);
 static void Solenoid_Select(uint8_t selection);
 static inline void Solenoid_Set(uint8_t on);
+static uint8_t Solenoid_ParseExactMask(const char *s, uint8_t *outMask);
 static inline uint8_t Read_Right_Limit_Switch(void);
 static void UART_TxKickoff(void);
 static void UART_QueueBytes(const uint8_t *data, uint16_t len);
@@ -217,6 +227,8 @@ static void VOFA_ParseCommand(const char *line);
 static void Send_Telemetry(void);
 static void Start_Peripherals(void);
 static void Run_Homing_Routine(void);
+static void home_motor1(void);
+static void home_motor2(void);
 void Control_Loop_1kHz(void);
 /* USER CODE END PFP */
 
@@ -244,6 +256,8 @@ static void Solenoid_WriteMask(uint8_t mask)
 
 static void Solenoid_Select(uint8_t selection)
 {
+    uint8_t newMask = 0U;
+
     if (selection == 0U)
     {
         solenoidState = 0U;
@@ -252,34 +266,98 @@ static void Solenoid_Select(uint8_t selection)
     }
     else if (selection == 1U)
     {
+        newMask = SL1_MASK;
         solenoidState = 1U;
-        solenoidMask |= SL1_MASK;
+        solenoidMask  = newMask;
         Solenoid_WriteMask(solenoidMask);
     }
     else if (selection == 2U)
     {
-        solenoidState = 2U;
-        solenoidMask |= SL2_MASK;
+        newMask = SL2_MASK;
+        solenoidState = 1U;
+        solenoidMask  = newMask;
         Solenoid_WriteMask(solenoidMask);
     }
     else if (selection == 3U)
     {
-        solenoidState = 3U;
-        solenoidMask |= SL3_MASK;
+        newMask = SL3_MASK;
+        solenoidState = 1U;
+        solenoidMask  = newMask;
         Solenoid_WriteMask(solenoidMask);
     }
     else if (selection == 4U)
     {
-        solenoidState = 4U;
-        solenoidMask |= SL4_MASK;
+        newMask = SL4_MASK;
+        solenoidState = 1U;
+        solenoidMask  = newMask;
         Solenoid_WriteMask(solenoidMask);
     }
     else if (selection == 5U)
     {
-        solenoidState = 5U;
-        solenoidMask |= SL5_SPECIAL_MASK;
+        newMask = SL5_SPECIAL_MASK;
+        solenoidState = 1U;
+        solenoidMask  = newMask;
         Solenoid_WriteMask(solenoidMask);
     }
+}
+
+static uint8_t Solenoid_ParseExactMask(const char *s, uint8_t *outMask)
+{
+    uint8_t mask = 0U;
+    uint8_t sawDigit = 0U;
+
+    if ((s == NULL) || (outMask == NULL))
+    {
+        return 0U;
+    }
+
+    while (*s != '\0')
+    {
+        char c = *s++;
+        sawDigit = 1U;
+
+        switch (c)
+        {
+            case '0':
+                if (*s != '\0' || mask != 0U)
+                {
+                    return 0U;
+                }
+                mask = 0U;
+                break;
+
+            case '1':
+                mask |= SL1_MASK;
+                break;
+
+            case '2':
+                mask |= SL2_MASK;
+                break;
+
+            case '3':
+                mask |= SL3_MASK;
+                break;
+
+            case '4':
+                mask |= SL4_MASK;
+                break;
+
+            case '5':
+                mask |= SL5_SPECIAL_MASK;
+                break;
+
+            default:
+                return 0U;
+        }
+    }
+
+    if (sawDigit == 0U)
+    {
+        return 0U;
+    }
+
+    *outMask = mask;
+    return 1U;
 }
 
 static inline void Solenoid_Set(uint8_t on)
@@ -405,16 +483,50 @@ static void VOFA_ParseCommand(const char *line)
     }
     else if (strcmp(prefix, "SL") == 0)
     {
-        long selection = strtol(eq + 1, NULL, 10);
+        uint8_t newMask = 0U;
+        char roundedStr[16];
+        char *endptr = NULL;
+        float rawSel;
+        long roundedSel;
 
-        if ((selection >= 0L) && (selection <= (long)NUM_SOLENOIDS))
+        rawSel = strtof(eq + 1, &endptr);
+
+        if ((endptr == (eq + 1)) || ((*endptr != '\0') && (*endptr != '\r') && (*endptr != '\n')))
         {
-            Solenoid_Select((uint8_t)selection);
-            snprintf(ack, sizeof(ack), "ACK SL=%ld\r\n", selection);
+            snprintf(ack, sizeof(ack), "ERR SL format\r\n");
         }
         else
         {
-            snprintf(ack, sizeof(ack), "ERR SL range 0-5\r\n");
+            /* Round float from VOFA to nearest integer */
+            if (rawSel >= 0.0f)
+            {
+                roundedSel = (long)(rawSel + 0.5f);
+            }
+            else
+            {
+                roundedSel = (long)(rawSel - 0.5f);
+            }
+
+            if ((roundedSel < 0L) || (roundedSel > 55555L))
+            {
+                snprintf(ack, sizeof(ack), "ERR SL range\r\n");
+            }
+            else
+            {
+                snprintf(roundedStr, sizeof(roundedStr), "%ld", roundedSel);
+
+                if (Solenoid_ParseExactMask(roundedStr, &newMask) != 0U)
+                {
+                    solenoidMask  = newMask;
+                    solenoidState = (newMask != 0U) ? 1U : 0U;
+                    Solenoid_WriteMask(solenoidMask);
+                    snprintf(ack, sizeof(ack), "ACK SL=%s\r\n", roundedStr);
+                }
+                else
+                {
+                    snprintf(ack, sizeof(ack), "ERR SL format\r\n");
+                }
+            }
         }
     }
     else if (strcmp(prefix, "RE") == 0)
@@ -512,9 +624,9 @@ static void Start_Peripherals(void)
     HAL_UART_Receive_IT(&huart2, &rxByte, 1);
 
     /* SR595 pin mapping:
-       PB3  = data
-       PB5  = clock
-       PA15 = latch
+     PB0 = data
+     PB1 = clock
+     PC5 = latch
     */
     hsr.data_port  = GPIOB;
     hsr.data_pin   = GPIO_PIN_0;
@@ -549,12 +661,29 @@ static void Start_Peripherals(void)
 
 static void Run_Homing_Routine(void)
 {
-    uint32_t startTick;
-
     homingActive = 1U;
     Send_Telemetry();
+
     controlEnabled = 0U;
 
+    /* Stop both motors before homing */
+    PWM_SetDuty(&PWM_FWD_TIM,    PWM_FWD_CH,    0.0f);
+    PWM_SetDuty(&PWM_REV_TIM,    PWM_REV_CH,    0.0f);
+    PWM_SetDuty(&M2_PWM_FWD_TIM, M2_PWM_FWD_CH, 0.0f);
+    PWM_SetDuty(&M2_PWM_REV_TIM, M2_PWM_REV_CH, 0.0f);
+
+    /* Home motor 2 first, then motor 1 */
+    home_motor2();
+    home_motor1();
+
+    homingActive = 0U;
+    controlEnabled = 1U;
+
+    Send_Telemetry();
+}
+
+static void home_motor1(void)
+{
     PWM_SetDuty(&PWM_FWD_TIM, PWM_FWD_CH, 0.0f);
     PWM_SetDuty(&PWM_REV_TIM, PWM_REV_CH, 0.0f);
 
@@ -579,20 +708,13 @@ static void Run_Homing_Routine(void)
     PWM_SetDuty(&PWM_REV_TIM, PWM_REV_CH, 0.0f);
     HAL_Delay(HOMING_SETTLE_MS);
 
-    /* Seek toward the home switch. */
+    /* Seek toward the home switch. No timeout. */
     dir = +1;
-    startTick = HAL_GetTick();
 
     while (Read_Right_Limit_Switch() == 0U)
     {
         PWM_SetDuty(&PWM_REV_TIM, PWM_FWD_CH, 0.5f);
         PWM_SetDuty(&PWM_FWD_TIM, PWM_REV_CH, 0.0f);
-
-        if ((HAL_GetTick() - startTick) > HOMING_TIMEOUT_MS)
-        {
-            break;
-        }
-
         HAL_Delay(1);
     }
 
@@ -618,12 +740,149 @@ static void Run_Homing_Routine(void)
     limitSwitchRight     = Read_Right_Limit_Switch();
 
     HAL_Delay(100);
-
-    homingActive = 0U;
-    controlEnabled = 1U;
-    Send_Telemetry();
 }
 
+static void home_motor2(void)
+{
+    uint32_t startTick;
+    uint32_t windowStart;
+    uint32_t stallStartTick;
+
+    int32_t rawCount2;
+    int32_t delta2;
+    int32_t absDelta2;
+    int32_t windowMotionCounts;
+
+    float backoffTargetAngle;
+
+    PWM_SetDuty(&M2_PWM_FWD_TIM, M2_PWM_FWD_CH, 0.0f);
+    PWM_SetDuty(&M2_PWM_REV_TIM, M2_PWM_REV_CH, 0.0f);
+
+    pid2.integrator      = 0.0f;
+    pid2.differentiator  = 0.0f;
+    pid2.prevError       = 0.0f;
+    pid2.prevMeasurement = actualAngle2;
+    control_u2           = 0.0f;
+    duty_cmd2            = 0.0f;
+    dir_state2           = 0;
+    applied_dir2         = 0;
+    deadtimeTicks2       = 0U;
+
+    prevRawCount2 = (int32_t)TIM3->CNT;
+
+    /* decreasing actualAngle2 means going toward home */
+    dir2 = -1;
+    startTick = HAL_GetTick();
+    windowStart = startTick;
+    stallStartTick = 0U;
+    windowMotionCounts = 0;
+
+    while (1)
+    {
+        /* Keep your current motor 2 direction mapping exactly as-is */
+        PWM_SetDuty(&M2_PWM_FWD_TIM, M2_PWM_FWD_CH, HOMING2_SEEK_DUTY);
+        PWM_SetDuty(&M2_PWM_REV_TIM, M2_PWM_REV_CH, 0.0f);
+
+        rawCount2 = (int32_t)TIM3->CNT;
+
+        delta2 = rawCount2 - prevRawCount2;
+        if (delta2 > 32767)  delta2 -= 65536;
+        if (delta2 < -32767) delta2 += 65536;
+        prevRawCount2 = rawCount2;
+
+        absAngle2 += (360.0f / COUNTS_PER_REV_M2) * (float)delta2;
+        actualAngle2 = absAngle2;
+
+        absDelta2 = delta2;
+        if (absDelta2 < 0)
+        {
+            absDelta2 = -absDelta2;
+        }
+        windowMotionCounts += absDelta2;
+
+        if ((HAL_GetTick() - windowStart) >= HOMING2_WINDOW_MS)
+        {
+            if ((HAL_GetTick() - startTick) >= HOMING2_STARTUP_IGNORE_MS)
+            {
+                if (windowMotionCounts <= HOMING2_STALL_COUNTS)
+                {
+                    if (stallStartTick == 0U)
+                    {
+                        stallStartTick = HAL_GetTick();
+                    }
+
+                    if ((HAL_GetTick() - stallStartTick) >= HOMING2_STALL_CONFIRM_MS)
+                    {
+                        break;
+                    }
+                }
+                else
+                {
+                    stallStartTick = 0U;
+                }
+            }
+
+            windowMotionCounts = 0;
+            windowStart = HAL_GetTick();
+        }
+
+        HAL_Delay(1);
+    }
+
+    PWM_SetDuty(&M2_PWM_FWD_TIM, M2_PWM_FWD_CH, 0.0f);
+    PWM_SetDuty(&M2_PWM_REV_TIM, M2_PWM_REV_CH, 0.0f);
+    dir2 = 0;
+
+    HAL_Delay(HOMING2_SETTLE_MS);
+
+    /* Back off slightly from the wall */
+    backoffTargetAngle = actualAngle2 +
+        ((360.0f / COUNTS_PER_REV_M2) * (float)HOMING2_BACKOFF_COUNTS);
+
+    prevRawCount2 = (int32_t)TIM3->CNT;
+    dir2 = +1;
+
+    while (actualAngle2 < backoffTargetAngle)
+    {
+        /* Keep your current motor 2 direction mapping exactly as-is */
+        PWM_SetDuty(&M2_PWM_FWD_TIM, M2_PWM_FWD_CH, 0.0f);
+        PWM_SetDuty(&M2_PWM_REV_TIM, M2_PWM_REV_CH, HOMING2_BACKOFF_DUTY);
+
+        rawCount2 = (int32_t)TIM3->CNT;
+
+        delta2 = rawCount2 - prevRawCount2;
+        if (delta2 > 32767)  delta2 -= 65536;
+        if (delta2 < -32767) delta2 += 65536;
+        prevRawCount2 = rawCount2;
+
+        absAngle2 += (360.0f / COUNTS_PER_REV_M2) * (float)delta2;
+        actualAngle2 = absAngle2;
+
+        HAL_Delay(1);
+    }
+
+    PWM_SetDuty(&M2_PWM_FWD_TIM, M2_PWM_FWD_CH, 0.0f);
+    PWM_SetDuty(&M2_PWM_REV_TIM, M2_PWM_REV_CH, 0.0f);
+    dir2 = 0;
+
+    HAL_Delay(HOMING2_SETTLE_MS);
+
+    TIM3->CNT            = 0U;
+    prevRawCount2        = 0;
+    absAngle2            = 0.0f;
+    actualAngle2         = 0.0f;
+    desiredAngle2        = 0.0f;
+    control_u2           = 0.0f;
+    duty_cmd2            = 0.0f;
+    pid2.integrator      = 0.0f;
+    pid2.differentiator  = 0.0f;
+    pid2.prevError       = 0.0f;
+    pid2.prevMeasurement = 0.0f;
+    dir_state2           = 0;
+    applied_dir2         = 0;
+    dir2                 = 0;
+    deadtimeTicks2       = 0U;
+}
 /* USER CODE END 0 */
 
 /**
