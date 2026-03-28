@@ -12,7 +12,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "PID.h"
-// #include "sr595.h"
+#include "sr595.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -67,11 +67,15 @@
 #define M2_PWM_REV_CH       TIM_CHANNEL_1
 
 #define M2_PWM_FWD_TIM      htim2
-#define M2_PWM_FWD_CH       TIM_CHANNEL_3	
+#define M2_PWM_FWD_CH       TIM_CHANNEL_3
 
-/* Solenoid output: direct GPIO on PB5 */
-#define SOLENOID_GPIO_Port   GPIOB
-#define SOLENOID_Pin         GPIO_PIN_5
+/* Solenoid shift-register control */
+#define NUM_SOLENOIDS        5U
+#define SL1_MASK             ((uint8_t)(1U << 0))   /* QA */
+#define SL2_MASK             ((uint8_t)(1U << 4))   /* QE */
+#define SL3_MASK             ((uint8_t)(1U << 3))   /* QD */
+#define SL4_MASK             ((uint8_t)(1U << 2))   /* QC */
+#define SL5_SPECIAL_MASK     ((uint8_t)0xE2)        /* QB + QF + QG + QH */
 
 /* Limit switch */
 #define LIMIT_SW_GPIO_Port GPIOB
@@ -108,6 +112,7 @@ UART_HandleTypeDef huart2;
 volatile float desiredAngle = 60.0f;
 volatile uint8_t solenoidState = 0;
 volatile uint8_t limitSwitchRight = 0;
+
 /* ---------- Motor 1 ---------- */
 volatile float actualAngle = 0.0f;
 volatile float duty_cmd = 0.0f;
@@ -167,7 +172,6 @@ static volatile uint16_t deadtimeTicks2 = 0U;
 static volatile int32_t prevRawCount2 = 0;
 static volatile float absAngle2 = 0.0f;
 
-
 static volatile uint8_t controlEnabled = 0U;
 
 static volatile uint8_t homingActive = 0U;
@@ -186,18 +190,10 @@ static volatile uint8_t uartTxBusy = 0U;
 
 static char printMessage[128];
 
-/*
-static SR595_HandleTypeDef hsr595 =
-{
-    .data_port  = SR595_DATA_GPIO_Port,
-    .data_pin   = SR595_DATA_Pin,
-    .clk_port   = SR595_CLK_GPIO_Port,
-    .clk_pin    = SR595_CLK_Pin,
-    .latch_port = SR595_LATCH_GPIO_Port,
-    .latch_pin  = SR595_LATCH_Pin,
-    .state      = 0x00
-};
-*/
+/* SR595 state */
+SR595_HandleTypeDef hsr;
+static uint8_t solenoidMask = 0U;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -210,6 +206,8 @@ static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
 static inline void PWM_SetDuty(TIM_HandleTypeDef *htim, uint32_t channel, float duty);
+static void Solenoid_WriteMask(uint8_t mask);
+static void Solenoid_Select(uint8_t selection);
 static inline void Solenoid_Set(uint8_t on);
 static inline uint8_t Read_Right_Limit_Switch(void);
 static void UART_TxKickoff(void);
@@ -235,20 +233,70 @@ static inline void PWM_SetDuty(TIM_HandleTypeDef *htim, uint32_t channel, float 
     __HAL_TIM_SET_COMPARE(htim, channel, ccr);
 }
 
+static void Solenoid_WriteMask(uint8_t mask)
+{
+    /* Board is active-low:
+       logical 1 = solenoid ON
+       hardware needs 0 on that output to turn it ON
+    */
+	SR595_Write(&hsr, mask);
+}
+
+static void Solenoid_Select(uint8_t selection)
+{
+    if (selection == 0U)
+    {
+        solenoidState = 0U;
+        solenoidMask  = 0U;
+        Solenoid_WriteMask(solenoidMask);
+    }
+    else if (selection == 1U)
+    {
+        solenoidState = 1U;
+        solenoidMask |= SL1_MASK;
+        Solenoid_WriteMask(solenoidMask);
+    }
+    else if (selection == 2U)
+    {
+        solenoidState = 2U;
+        solenoidMask |= SL2_MASK;
+        Solenoid_WriteMask(solenoidMask);
+    }
+    else if (selection == 3U)
+    {
+        solenoidState = 3U;
+        solenoidMask |= SL3_MASK;
+        Solenoid_WriteMask(solenoidMask);
+    }
+    else if (selection == 4U)
+    {
+        solenoidState = 4U;
+        solenoidMask |= SL4_MASK;
+        Solenoid_WriteMask(solenoidMask);
+    }
+    else if (selection == 5U)
+    {
+        solenoidState = 5U;
+        solenoidMask |= SL5_SPECIAL_MASK;
+        Solenoid_WriteMask(solenoidMask);
+    }
+}
+
 static inline void Solenoid_Set(uint8_t on)
 {
-    solenoidState = (on != 0U) ? 1U : 0U;
-
-    HAL_GPIO_WritePin(
-        SOLENOID_GPIO_Port,
-        SOLENOID_Pin,
-        (solenoidState != 0U) ? GPIO_PIN_SET : GPIO_PIN_RESET
-    );
+    if (on != 0U)
+    {
+        Solenoid_Select(1U);
+    }
+    else
+    {
+        Solenoid_Select(0U);
+    }
 }
 
 static inline uint8_t Read_Right_Limit_Switch(void)
 {
-    return (HAL_GPIO_ReadPin(LIMIT_SW_GPIO_Port, LIMIT_SW_Pin) == GPIO_PIN_SET) ? 0U :1U;
+    return (HAL_GPIO_ReadPin(LIMIT_SW_GPIO_Port, LIMIT_SW_Pin) == GPIO_PIN_SET) ? 0U : 1U;
 }
 
 static void UART_TxKickoff(void)
@@ -357,15 +405,16 @@ static void VOFA_ParseCommand(const char *line)
     }
     else if (strcmp(prefix, "SL") == 0)
     {
-        if (val >= 0.5f)
+        long selection = strtol(eq + 1, NULL, 10);
+
+        if ((selection >= 0L) && (selection <= (long)NUM_SOLENOIDS))
         {
-            Solenoid_Set(1U);
-            snprintf(ack, sizeof(ack), "ACK SL=1\r\n");
+            Solenoid_Select((uint8_t)selection);
+            snprintf(ack, sizeof(ack), "ACK SL=%ld\r\n", selection);
         }
         else
         {
-            Solenoid_Set(0U);
-            snprintf(ack, sizeof(ack), "ACK SL=0\r\n");
+            snprintf(ack, sizeof(ack), "ERR SL range 0-5\r\n");
         }
     }
     else if (strcmp(prefix, "RE") == 0)
@@ -380,34 +429,33 @@ static void VOFA_ParseCommand(const char *line)
             snprintf(ack, sizeof(ack), "ACK RE=0\r\n");
         }
     }
-		else if (strcmp(prefix, "KP2") == 0)
-			{
-					pid2.Kp = val;
-					snprintf(ack, sizeof(ack), "ACK KP2=%.5f\r\n", pid2.Kp);
-			}
-			else if (strcmp(prefix, "KI2") == 0)
-			{
-					pid2.Ki = val;
-					pid2.integrator = 0.0f;
-					snprintf(ack, sizeof(ack), "ACK KI2=%.5f\r\n", pid2.Ki);
-			}
-			else if (strcmp(prefix, "KD2") == 0)
-			{
-					pid2.Kd = val;
-					pid2.differentiator = 0.0f;
-					snprintf(ack, sizeof(ack), "ACK KD2=%.5f\r\n", pid2.Kd);
-			}
-			else if (strcmp(prefix, "TAU2") == 0)
-			{
-					pid2.tau = val;
-					snprintf(ack, sizeof(ack), "ACK TAU2=%.5f\r\n", pid2.tau);
-			}
-			else if (strcmp(prefix, "SP2") == 0)
-			{
-					desiredAngle2 = val;
-					snprintf(ack, sizeof(ack), "ACK SP2=%.3f\r\n", desiredAngle2);
-			}
-			
+    else if (strcmp(prefix, "KP2") == 0)
+    {
+        pid2.Kp = val;
+        snprintf(ack, sizeof(ack), "ACK KP2=%.5f\r\n", pid2.Kp);
+    }
+    else if (strcmp(prefix, "KI2") == 0)
+    {
+        pid2.Ki = val;
+        pid2.integrator = 0.0f;
+        snprintf(ack, sizeof(ack), "ACK KI2=%.5f\r\n", pid2.Ki);
+    }
+    else if (strcmp(prefix, "KD2") == 0)
+    {
+        pid2.Kd = val;
+        pid2.differentiator = 0.0f;
+        snprintf(ack, sizeof(ack), "ACK KD2=%.5f\r\n", pid2.Kd);
+    }
+    else if (strcmp(prefix, "TAU2") == 0)
+    {
+        pid2.tau = val;
+        snprintf(ack, sizeof(ack), "ACK TAU2=%.5f\r\n", pid2.tau);
+    }
+    else if (strcmp(prefix, "SP2") == 0)
+    {
+        desiredAngle2 = val;
+        snprintf(ack, sizeof(ack), "ACK SP2=%.3f\r\n", desiredAngle2);
+    }
     else
     {
         snprintf(ack, sizeof(ack), "ERR unknown cmd: %s\r\n", prefix);
@@ -463,25 +511,40 @@ static void Start_Peripherals(void)
 
     HAL_UART_Receive_IT(&huart2, &rxByte, 1);
 
-    Solenoid_Set(0U);
+    /* SR595 pin mapping:
+       PB3  = data
+       PB5  = clock
+       PA15 = latch
+    */
+    hsr.data_port  = GPIOB;
+    hsr.data_pin   = GPIO_PIN_0;
+    hsr.clk_port   = GPIOB;
+    hsr.clk_pin    = GPIO_PIN_1;
+    hsr.latch_port = GPIOC;
+    hsr.latch_pin  = GPIO_PIN_5;
+
+    SR595_Init(&hsr);
+    solenoidMask = 0U;
+    Solenoid_WriteMask(solenoidMask);
+
     controlEnabled = 1U;
-		
-		PIDController_Init(&pid2);
 
-		HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);
+    PIDController_Init(&pid2);
 
-		HAL_TIM_PWM_Start(&M2_PWM_REV_TIM, M2_PWM_REV_CH);
-		HAL_TIM_PWM_Start(&M2_PWM_FWD_TIM, M2_PWM_FWD_CH);
+    HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);
 
-		PWM_SetDuty(&M2_PWM_REV_TIM, M2_PWM_REV_CH, 0.0f);
-		PWM_SetDuty(&M2_PWM_FWD_TIM, M2_PWM_FWD_CH, 0.0f);
+    HAL_TIM_PWM_Start(&M2_PWM_REV_TIM, M2_PWM_REV_CH);
+    HAL_TIM_PWM_Start(&M2_PWM_FWD_TIM, M2_PWM_FWD_CH);
 
-		prevRawCount2 = (int32_t)TIM3->CNT;
-		absAngle2 = 0.0f;
-		dir_state2 = 0;
-		applied_dir2 = 0;
-		dir2 = 0;
-		deadtimeTicks2 = 0U;
+    PWM_SetDuty(&M2_PWM_REV_TIM, M2_PWM_REV_CH, 0.0f);
+    PWM_SetDuty(&M2_PWM_FWD_TIM, M2_PWM_FWD_CH, 0.0f);
+
+    prevRawCount2 = (int32_t)TIM3->CNT;
+    absAngle2 = 0.0f;
+    dir_state2 = 0;
+    applied_dir2 = 0;
+    dir2 = 0;
+    deadtimeTicks2 = 0U;
 }
 
 static void Run_Homing_Routine(void)
@@ -507,26 +570,31 @@ static void Run_Homing_Routine(void)
     limitSwitchRight    = Read_Right_Limit_Switch();
 
     /* If already sitting on the home switch, back off first so the next hit is real. */
-		dir = -1;
-		PWM_SetDuty(&PWM_FWD_TIM, PWM_REV_CH, HOMING_MOVE_AWAY_DUTY);
-		PWM_SetDuty(&PWM_REV_TIM, PWM_FWD_CH, 0.0f);
-		HAL_Delay(HOMING_MOVE_AWAY_MS);
+    dir = -1;
+    PWM_SetDuty(&PWM_FWD_TIM, PWM_REV_CH, HOMING_MOVE_AWAY_DUTY);
+    PWM_SetDuty(&PWM_REV_TIM, PWM_FWD_CH, 0.0f);
+    HAL_Delay(HOMING_MOVE_AWAY_MS);
 
-		PWM_SetDuty(&PWM_FWD_TIM, PWM_FWD_CH, 0.0f);
-		PWM_SetDuty(&PWM_REV_TIM, PWM_REV_CH, 0.0f);
-		HAL_Delay(HOMING_SETTLE_MS);
+    PWM_SetDuty(&PWM_FWD_TIM, PWM_FWD_CH, 0.0f);
+    PWM_SetDuty(&PWM_REV_TIM, PWM_REV_CH, 0.0f);
+    HAL_Delay(HOMING_SETTLE_MS);
 
-			/* Seek toward the home switch. */
-			dir = +1;
-			startTick = HAL_GetTick();
+    /* Seek toward the home switch. */
+    dir = +1;
+    startTick = HAL_GetTick();
 
-			while (Read_Right_Limit_Switch() == 0U)
-			{
-					PWM_SetDuty(&PWM_REV_TIM, PWM_FWD_CH, 0.5);
-					PWM_SetDuty(&PWM_FWD_TIM, PWM_REV_CH, 0.0f);
+    while (Read_Right_Limit_Switch() == 0U)
+    {
+        PWM_SetDuty(&PWM_REV_TIM, PWM_FWD_CH, 0.5f);
+        PWM_SetDuty(&PWM_FWD_TIM, PWM_REV_CH, 0.0f);
 
-					HAL_Delay(1);
-			}
+        if ((HAL_GetTick() - startTick) > HOMING_TIMEOUT_MS)
+        {
+            break;
+        }
+
+        HAL_Delay(1);
+    }
 
     PWM_SetDuty(&PWM_FWD_TIM, PWM_FWD_CH, 0.0f);
     PWM_SetDuty(&PWM_REV_TIM, PWM_REV_CH, 0.0f);
@@ -592,42 +660,45 @@ int main(void)
   MX_USART2_UART_Init();
   MX_TIM2_Init();
   MX_TIM3_Init();
+
   /* USER CODE BEGIN 2 */
   Start_Peripherals();
   // Run_Homing_Routine();
 
-
   uint32_t nextCtrlTick  = HAL_GetTick();
   uint32_t nextPrintTick = HAL_GetTick();
-
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-	while (1)
-	{
-			uint32_t now = HAL_GetTick();
+  while (1)
+  {
+    uint32_t now = HAL_GetTick();
 
-			if (homingRequest != 0U)
-			{
-					homingRequest = 0U;
-					Run_Homing_Routine();
-					nextCtrlTick  = HAL_GetTick();
-					nextPrintTick = HAL_GetTick();
-			}
+    if (homingRequest != 0U)
+    {
+      homingRequest = 0U;
+      Run_Homing_Routine();
+      nextCtrlTick  = HAL_GetTick();
+      nextPrintTick = HAL_GetTick();
+    }
 
-			if ((uint32_t)(now - nextCtrlTick) >= 1U)
-			{
-					nextCtrlTick += 1U;
-					Control_Loop_1kHz();
-			}
+    if ((uint32_t)(now - nextCtrlTick) >= 1U)
+    {
+      nextCtrlTick += 1U;
+      Control_Loop_1kHz();
+    }
 
-			if ((uint32_t)(now - nextPrintTick) >= TELEMETRY_MS)
-			{
-					nextPrintTick += TELEMETRY_MS;
-					Send_Telemetry();
-			}
-	}
+    if ((uint32_t)(now - nextPrintTick) >= TELEMETRY_MS)
+    {
+      nextPrintTick += TELEMETRY_MS;
+      Send_Telemetry();
+    }
+
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
+  }
   /* USER CODE END 3 */
 }
 
@@ -774,10 +845,10 @@ static void MX_TIM2_Init(void)
 
   /* USER CODE END TIM2_Init 1 */
   htim2.Instance = TIM2;
-	htim2.Init.Prescaler = 3;
-	htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-	htim2.Init.Period = 999;
-	htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.Prescaler = 3;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 999;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_PWM_Init(&htim2) != HAL_OK)
   {
@@ -881,7 +952,7 @@ static void MX_TIM4_Init(void)
   htim4.Init.Period = 65535;
   htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  sConfig.EncoderMode = TIM_ENCODERMODE_TI12;
+  sConfig.EncoderMode = TIM_ENCODERMODE_TI1;
   sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
@@ -954,19 +1025,43 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_5, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_3|GPIO_PIN_5, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3|GPIO_PIN_5, GPIO_PIN_RESET);
-
   /*Configure GPIO pins : PA0 PA1 */
-	GPIO_InitStruct.Pin = GPIO_PIN_12;
-	GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;   // ? RISING,????
-	GPIO_InitStruct.Pull = GPIO_PULLUP;
-	HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PC5 */
+  GPIO_InitStruct.Pin = GPIO_PIN_5;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PB0 PB1 PB3 PB5 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_3|GPIO_PIN_5;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PB12 */
+  GPIO_InitStruct.Pin = GPIO_PIN_12;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /*Configure GPIO pin : PA15 */
   GPIO_InitStruct.Pin = GPIO_PIN_15;
@@ -975,18 +1070,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PB3 PB5 */
-  GPIO_InitStruct.Pin = GPIO_PIN_3|GPIO_PIN_5;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
   /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
-	HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+  HAL_NVIC_SetPriority(EXTI0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
 
-
+  HAL_NVIC_SetPriority(EXTI1_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI1_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -1083,7 +1172,7 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 void Control_Loop_1kHz(void)
 {
     /* =========================
-       Motor 1 (??????????)
+       Motor 1
        ========================= */
     int32_t rawCount;
     int32_t delta;
@@ -1288,13 +1377,13 @@ void Control_Loop_1kHz(void)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
   }
   /* USER CODE END Error_Handler_Debug */
 }
+
 #ifdef USE_FULL_ASSERT
 /**
   * @brief  Reports the name of the source file and the source line number
@@ -1306,8 +1395,6 @@ void Error_Handler(void)
 void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
