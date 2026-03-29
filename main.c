@@ -108,6 +108,9 @@
 #define HOMING2_MAX_SEEK_MS      3000U
 #define HOMING2_MAX_BACKOFF_MS   1500U
 
+#define SPREAD_STEP_DEG      80.0f
+#define SPREAD_LEVEL_MIN     0
+#define SPREAD_LEVEL_MAX     2
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -235,6 +238,8 @@ static void Run_Homing_Routine(void);
 static void home_motor1(void);
 static void home_motor2(void);
 void Control_Loop_1kHz(void);
+static int32_t RoundFloatToInt(float x);
+static float SpreadLevelToAngle(int32_t level);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -248,6 +253,32 @@ static inline void PWM_SetDuty(TIM_HandleTypeDef *htim, uint32_t channel, float 
     uint32_t arr = __HAL_TIM_GET_AUTORELOAD(htim);
     uint32_t ccr = (uint32_t)(duty * (float)arr);
     __HAL_TIM_SET_COMPARE(htim, channel, ccr);
+}
+
+static int32_t RoundFloatToInt(float x)
+{
+    if (x >= 0.0f)
+    {
+        return (int32_t)(x + 0.5f);
+    }
+    else
+    {
+        return (int32_t)(x - 0.5f);
+    }
+}
+
+static float SpreadLevelToAngle(int32_t level)
+{
+    if (level < SPREAD_LEVEL_MIN)
+    {
+        level = SPREAD_LEVEL_MIN;
+    }
+    if (level > SPREAD_LEVEL_MAX)
+    {
+        level = SPREAD_LEVEL_MAX;
+    }
+
+    return ((float)level) * SPREAD_STEP_DEG;
 }
 
 static void Solenoid_WriteMask(uint8_t mask)
@@ -574,10 +605,37 @@ static void VOFA_ParseCommand(const char *line)
         snprintf(ack, sizeof(ack), "ACK TAU2=%.5f\r\n", pid2.tau);
     }
     else if (strcmp(prefix, "SP2") == 0)
-    {
-        desiredAngle2 = val;
-        snprintf(ack, sizeof(ack), "ACK SP2=%.3f\r\n", desiredAngle2);
-    }
+{
+    desiredAngle2 = val;
+    snprintf(ack, sizeof(ack), "ACK SP2=%.3f\r\n", desiredAngle2);
+}
+	else if (strcmp(prefix, "SF") == 0)
+	{
+			int32_t spreadLevel = RoundFloatToInt(val);
+
+			if ((spreadLevel < SPREAD_LEVEL_MIN) || (spreadLevel > SPREAD_LEVEL_MAX))
+			{
+					snprintf(
+							ack,
+							sizeof(ack),
+							"ERR SF range (%d..%d)\r\n",
+							SPREAD_LEVEL_MIN,
+							SPREAD_LEVEL_MAX
+					);
+			}
+			else
+			{
+					desiredAngle2 = SpreadLevelToAngle(spreadLevel);
+
+					snprintf(
+							ack,
+							sizeof(ack),
+							"ACK SF=%ld -> SP2=%.3f\r\n",
+							(long)spreadLevel,
+							desiredAngle2
+					);
+			}
+	}
     else
     {
         snprintf(ack, sizeof(ack), "ERR unknown cmd: %s\r\n", prefix);
