@@ -38,17 +38,10 @@
 #define PID_LIM_MAX_INT   5.0f
 
 /* Controller parameters - Motor 2 */
-#define PID2_KP           0.1f
-#define PID2_KI           0.0f
-#define PID2_KD           0.0f
-#define PID2_TAU          0.02f
-
-/* 3/29 Working Parameters
 #define PID2_KP           0.2f
 #define PID2_KI           0.0f
 #define PID2_KD           0.015f
 #define PID2_TAU          0.02f
-*/
 
 #define PID2_LIM_MIN     -10.0f
 #define PID2_LIM_MAX      10.0f
