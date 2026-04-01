@@ -115,7 +115,7 @@
 
 static const float kSpreadAngleTable[5] =
 {
-    0.0f,   /* level 0 */
+    -20.0f,   /* level 0 */
     40.0f,  /* level 1 */
     80.0f,  /* level 2 */
     120.0f, /* level 3 */
