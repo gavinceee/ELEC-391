@@ -38,10 +38,10 @@
 #define PID_LIM_MAX_INT   5.0f
 
 /* Controller parameters - Motor 2 */
-#define PID2_KP           0.2f
+#define PID2_KP           1.5f
 #define PID2_KI           0.0f
-#define PID2_KD           0.015f
-#define PID2_TAU          0.02f
+#define PID2_KD           0.04f
+#define PID2_TAU          0.2f
 
 #define PID2_LIM_MIN     -10.0f
 #define PID2_LIM_MAX      10.0f
@@ -84,12 +84,14 @@
 /* Hysteresis / safety */
 #define U_ON              0.30f
 #define U_OFF             0.05f
-#define DUTY_MAX          0.4f
+#define DUTY_MAX          0.38f
 #define DUTY_MIN_ACTIVE   0.15f
 #define DEADTIME_MS       50U
 
+#define DUTY_MAX2         0.5f
+
 #define HOMING_MOVE_AWAY_DUTY   0.4f
-#define HOMING_SEEK_DUTY        0.4f
+#define HOMING_SEEK_DUTY        0.35f
 #define HOMING_MOVE_AWAY_MS     250U
 #define HOMING_SETTLE_MS         30U
 #define HOMING_TIMEOUT_MS      4000U
@@ -108,9 +110,17 @@
 #define HOMING2_MAX_SEEK_MS      3000U
 #define HOMING2_MAX_BACKOFF_MS   1500U
 
-#define SPREAD_STEP_DEG      80.0f
 #define SPREAD_LEVEL_MIN     0
-#define SPREAD_LEVEL_MAX     2
+#define SPREAD_LEVEL_MAX     4
+
+static const float kSpreadAngleTable[5] =
+{
+    -20.0f,   /* level 0 */
+    40.0f,  /* level 1 */
+    80.0f,  /* level 2 */
+    120.0f, /* level 3 */
+    160.0f  /* level 4 */
+};
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -278,7 +288,7 @@ static float SpreadLevelToAngle(int32_t level)
         level = SPREAD_LEVEL_MAX;
     }
 
-    return ((float)level) * SPREAD_STEP_DEG;
+    return kSpreadAngleTable[level];
 }
 
 static void Solenoid_WriteMask(uint8_t mask)
@@ -781,7 +791,7 @@ static void home_motor1(void)
 
     while (Read_Right_Limit_Switch() == 0U)
     {
-        PWM_SetDuty(&PWM_REV_TIM, PWM_FWD_CH, 0.5f);
+        PWM_SetDuty(&PWM_REV_TIM, PWM_FWD_CH, HOMING_SEEK_DUTY);
         PWM_SetDuty(&PWM_FWD_TIM, PWM_REV_CH, 0.0f);
         HAL_Delay(1);
     }
@@ -791,7 +801,7 @@ static void home_motor1(void)
 
     PWM_SetDuty(&PWM_FWD_TIM, PWM_REV_CH, HOMING_MOVE_AWAY_DUTY);
     PWM_SetDuty(&PWM_REV_TIM, PWM_FWD_CH, 0.0f);
-    HAL_Delay(100);
+    HAL_Delay(50);
 
     PWM_SetDuty(&PWM_FWD_TIM, PWM_FWD_CH, 0.0f);
     PWM_SetDuty(&PWM_REV_TIM, PWM_REV_CH, 0.0f);
