@@ -963,7 +963,7 @@ static void home_motor2(void)
     prevRawCount2        = 0;
     absAngle2            = 0.0f;
     actualAngle2         = 0.0f;
-    desiredAngle2        = 0.0f;
+    desiredAngle2        = -20.0f;
     control_u2           = 0.0f;
     duty_cmd2            = 0.0f;
     pid2.integrator      = 0.0f;
