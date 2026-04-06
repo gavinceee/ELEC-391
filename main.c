@@ -27,10 +27,10 @@
 /* USER CODE BEGIN PD */
 
 /* Controller parameters - Motor 1 */
-#define PID_KP           0.7915f
-#define PID_KI           1.0f
-#define PID_KD           0.0f
-#define PID_TAU          0.02f
+#define PID_KP           0.7f
+#define PID_KI           0.5f
+#define PID_KD           0.0021f
+#define PID_TAU          0.3f
 
 #define PID_LIM_MIN     -10.0f
 #define PID_LIM_MAX      10.0f
@@ -38,7 +38,7 @@
 #define PID_LIM_MAX_INT   5.0f
 
 /* Controller parameters - Motor 2 */
-#define PID2_KP           1.5f
+#define PID2_KP           1.0f
 #define PID2_KI           0.0f
 #define PID2_KD           0.04f
 #define PID2_TAU          0.2f
@@ -115,7 +115,7 @@
 
 static const float kSpreadAngleTable[5] =
 {
-    -20.0f,   /* level 0 */
+    0.0f,   /* level 0 */
     40.0f,  /* level 1 */
     80.0f,  /* level 2 */
     120.0f, /* level 3 */
@@ -922,36 +922,36 @@ static void home_motor2(void)
 
     HAL_Delay(HOMING2_SETTLE_MS);
 
-    /* Back off slightly from the wall */
-    backoffTargetAngle = actualAngle2 +
-        ((360.0f / COUNTS_PER_REV_M2) * (float)HOMING2_BACKOFF_COUNTS);
-
-    prevRawCount2 = (int32_t)TIM3->CNT;
-    dir2 = +1;
-		uint32_t backoffStartTick = HAL_GetTick();
-
-		while (actualAngle2 < backoffTargetAngle)
-		{
-				if ((HAL_GetTick() - backoffStartTick) >= HOMING2_MAX_BACKOFF_MS)
-				{
-						break;
-				}
-
-				PWM_SetDuty(&M2_PWM_FWD_TIM, M2_PWM_FWD_CH, 0.0f);
-				PWM_SetDuty(&M2_PWM_REV_TIM, M2_PWM_REV_CH, HOMING2_BACKOFF_DUTY);
-
-				rawCount2 = (int32_t)TIM3->CNT;
-
-				delta2 = rawCount2 - prevRawCount2;
-				if (delta2 > 32767)  delta2 -= 65536;
-				if (delta2 < -32767) delta2 += 65536;
-				prevRawCount2 = rawCount2;
-
-				absAngle2 += (360.0f / COUNTS_PER_REV_M2) * (float)delta2;
-				actualAngle2 = absAngle2;
-
-				HAL_Delay(1);
-		}
+//    /* Back off slightly from the wall */
+//    backoffTargetAngle = actualAngle2 +
+//        ((360.0f / COUNTS_PER_REV_M2) * (float)HOMING2_BACKOFF_COUNTS);
+//
+//    prevRawCount2 = (int32_t)TIM3->CNT;
+//    dir2 = +1;
+//		uint32_t backoffStartTick = HAL_GetTick();
+//
+//		while (actualAngle2 < backoffTargetAngle)
+//		{
+//				if ((HAL_GetTick() - backoffStartTick) >= HOMING2_MAX_BACKOFF_MS)
+//				{
+//						break;
+//				}
+//
+//				PWM_SetDuty(&M2_PWM_FWD_TIM, M2_PWM_FWD_CH, 0.0f);
+//				PWM_SetDuty(&M2_PWM_REV_TIM, M2_PWM_REV_CH, HOMING2_BACKOFF_DUTY);
+//
+//				rawCount2 = (int32_t)TIM3->CNT;
+//
+//				delta2 = rawCount2 - prevRawCount2;
+//				if (delta2 > 32767)  delta2 -= 65536;
+//				if (delta2 < -32767) delta2 += 65536;
+//				prevRawCount2 = rawCount2;
+//
+//				absAngle2 += (360.0f / COUNTS_PER_REV_M2) * (float)delta2;
+//				actualAngle2 = absAngle2;
+//
+//				HAL_Delay(1);
+//		}
 
     PWM_SetDuty(&M2_PWM_FWD_TIM, M2_PWM_FWD_CH, 0.0f);
     PWM_SetDuty(&M2_PWM_REV_TIM, M2_PWM_REV_CH, 0.0f);
@@ -1256,11 +1256,11 @@ static void MX_TIM3_Init(void)
   sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC1Filter = 0;
+  sConfig.IC1Filter = 8;
   sConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC2Filter = 0;
+  sConfig.IC2Filter = 8;
   if (HAL_TIM_Encoder_Init(&htim3, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -1301,15 +1301,15 @@ static void MX_TIM4_Init(void)
   htim4.Init.Period = 65535;
   htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  sConfig.EncoderMode = TIM_ENCODERMODE_TI1;
+  sConfig.EncoderMode = TIM_ENCODERMODE_TI12;
   sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC1Filter = 0;
+  sConfig.IC1Filter = 8;
   sConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC2Filter = 0;
+  sConfig.IC2Filter = 8;
   if (HAL_TIM_Encoder_Init(&htim4, &sConfig) != HAL_OK)
   {
     Error_Handler();
